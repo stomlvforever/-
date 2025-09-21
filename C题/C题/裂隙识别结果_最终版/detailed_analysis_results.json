@@ -1,0 +1,20 @@
+{
+  "图1-1.jpg": {
+    "crack_pixels": 8758,
+    "total_pixels": 329400,
+    "crack_ratio": 0.026587735276259867,
+    "detail_image": "detailed_analysis_图1-1.png"
+  },
+  "图1-2.jpg": {
+    "crack_pixels": 5363,
+    "total_pixels": 329400,
+    "crack_ratio": 0.016281117182756526,
+    "detail_image": "detailed_analysis_图1-2.png"
+  },
+  "图1-3.jpg": {
+    "crack_pixels": 17803,
+    "total_pixels": 329400,
+    "crack_ratio": 0.05404675166970249,
+    "detail_image": "detailed_analysis_图1-3.png"
+  }
+}
