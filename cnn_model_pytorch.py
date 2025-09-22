@@ -27,7 +27,7 @@ class Config:
     DATA_PATH = r"数据集\数据集\源域数据集"
     WINDOW_SIZE = 4096  # 64*64 = 4096，匹配CNN输入
     OVERLAP_RATIO = 0.5  # 50%重叠
-    TRAIN_RATIO = 0.1  # 训练集比例
+    TRAIN_RATIO = 0.9  # 训练集比例
     
     # 模型相关参数
     NUM_CLASSES = 11  # 从12改为11
@@ -39,12 +39,7 @@ class Config:
     TRAINING_HISTORY_PATH = 'imgs/bearing_cnn_training_history_11class.png'
     
     # 第50-58行：修改类别名称
-    CLASS_NAMES = [
-        '正常', 
-        '内圈故障_0007', '内圈故障_0014', '内圈故障_0021', '内圈故障_0028',
-        '滚动体故障_0007', '滚动体故障_0014', '滚动体故障_0021', '滚动体故障_0028',
-        '外圈故障_0007', '外圈故障_0021'  # 移除外圈故障_0014和外圈故障_0028
-    ]
+
     INPUT_SIZE = (1, 64, 64)  # 输入图像尺寸
     GROWTH_RATE = 6  # DenseBlock增长率
     
