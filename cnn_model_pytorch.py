@@ -29,6 +29,9 @@ class Config:
     OVERLAP_RATIO = 0.5  # 50%重叠
     TRAIN_RATIO = 0.9  # 训练集比例
     
+    # 2D转换方法配置 - 新增
+    TRANSFORM_METHOD = 'cwt'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
+    
     # 模型相关参数
     NUM_CLASSES = 11  # 从12改为11
     
@@ -636,7 +639,8 @@ if __name__ == "__main__":
             overlap_ratio=Config.OVERLAP_RATIO,
             batch_size=Config.BATCH_SIZE,
             train_ratio=Config.TRAIN_RATIO,
-            transform_to_2d=True
+            transform_to_2d=True,
+            transform_method=Config.TRANSFORM_METHOD  # 新增这一行
         )
         
         log_and_print(f"训练批次数: {len(train_loader)}")
