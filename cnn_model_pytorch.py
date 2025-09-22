@@ -14,59 +14,11 @@ from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 from tqdm import tqdm
 from bearing_data_loader import create_bearing_dataloaders
+from config import Config
 
 # 设置matplotlib中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']  # 用来正常显示中文标签
 plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
-
-# ==================== 配置参数 ====================
-class Config:
-    """统一配置参数管理"""
-    
-    # 数据相关参数
-    DATA_PATH = r"数据集\数据集\源域数据集"
-    WINDOW_SIZE = 4096  # 64*64 = 4096，匹配CNN输入
-    OVERLAP_RATIO = 0.5  # 重叠
-    TRAIN_RATIO = 0.9  # 训练集比例
-    
-    # 2D转换方法配置 - 新增
-    TRANSFORM_METHOD = 'stft'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
-    
-    # 模型相关参数
-    NUM_CLASSES = 11  # 从12改为11
-    
-    # 第45-47行：修改文件路径
-    MODEL_STATE_PATH = 'model/bearing_fault_cnn_11class.pth'
-    MODEL_FULL_PATH = 'model/bearing_fault_cnn_11class_full.pth'
-    CONFUSION_MATRIX_PATH = 'imgs/confusion_matrix_11class.png'
-    TRAINING_HISTORY_PATH = 'imgs/bearing_cnn_training_history_11class.png'
-    
-    # 第50-58行：修改类别名称
-
-    INPUT_SIZE = (1, 64, 64)  # 输入图像尺寸
-    GROWTH_RATE = 6  # DenseBlock增长率
-    
-    # 训练相关参数
-    BATCH_SIZE = 32
-    EPOCHS = 50
-    LEARNING_RATE = 0.0005
-    
-    # 文件路径参数
-    MODEL_DIR = 'model'
-    LOG_DIR = 'log'
-    IMG_DIR = 'imgs'
-    MODEL_STATE_PATH = 'model/bearing_fault_cnn_11class.pth'  # 修改：文件名改为11class
-    MODEL_FULL_PATH = 'model/bearing_fault_cnn_11class_full.pth'  # 修改：文件名改为11class
-    CONFUSION_MATRIX_PATH = 'imgs/confusion_matrix_11class.png'  # 修改：文件名改为11class
-    TRAINING_HISTORY_PATH = 'imgs/bearing_cnn_training_history_11class.png'  # 修改：文件名改为11class
-    
-    # 11分类标签名称（移除外圈故障_0028）
-    CLASS_NAMES = [
-        '正常', 
-        '内圈故障_0007', '内圈故障_0014', '内圈故障_0021', '内圈故障_0028',
-        '滚动体故障_0007', '滚动体故障_0014', '滚动体故障_0021', '滚动体故障_0028',
-        '外圈故障_0007', '外圈故障_0021'  # 修改：移除外圈故障_0014和外圈故障_0028
-    ]
 
 # ==================== 日志设置 ====================
 def setup_logging():
@@ -516,41 +468,44 @@ def model_summary(model, input_size=(1, 64, 64)):
 
 def plot_training_history(history):
     """绘制训练历史"""
+    if not history:
+        print("没有训练历史数据")
+        return
+    
     epochs = range(1, len(history['train_loss']) + 1)
     
     plt.figure(figsize=(15, 5))
     
-    # 绘制损失
+    # 损失曲线
     plt.subplot(1, 3, 1)
     plt.plot(epochs, history['train_loss'], 'b-', label='训练损失', linewidth=2)
-    if 'val_loss' in history and history['val_loss']:
-        plt.plot(epochs, history['val_loss'], 'r-', label='验证损失', linewidth=2)
-    plt.title('模型损失', fontsize=14, fontweight='bold')
-    plt.xlabel('轮次', fontsize=12)
-    plt.ylabel('损失', fontsize=12)
+    plt.plot(epochs, history['val_loss'], 'r-', label='验证损失', linewidth=2)
+    plt.title('损失曲线', fontsize=14, fontweight='bold')
+    plt.xlabel('轮次')
+    plt.ylabel('损失')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 绘制准确率
+    # 准确率曲线
     plt.subplot(1, 3, 2)
     plt.plot(epochs, history['train_acc'], 'b-', label='训练准确率', linewidth=2)
-    if 'val_acc' in history and history['val_acc']:
-        plt.plot(epochs, history['val_acc'], 'r-', label='验证准确率', linewidth=2)
-    plt.title('模型准确率', fontsize=14, fontweight='bold')
-    plt.xlabel('轮次', fontsize=12)
-    plt.ylabel('准确率', fontsize=12)
+    plt.plot(epochs, history['val_acc'], 'r-', label='验证准确率', linewidth=2)
+    plt.title('准确率曲线', fontsize=14, fontweight='bold')
+    plt.xlabel('轮次')
+    plt.ylabel('准确率')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # 绘制学习率（如果有）
+    # 学习率曲线（如果有的话）
     plt.subplot(1, 3, 3)
     if 'learning_rate' in history and history['learning_rate']:
         plt.plot(epochs, history['learning_rate'], 'g-', label='学习率', linewidth=2)
-        plt.title('学习率变化', fontsize=14, fontweight='bold')
-        plt.xlabel('轮次', fontsize=12)
-        plt.ylabel('学习率', fontsize=12)
+        plt.title('学习率曲线', fontsize=14, fontweight='bold')
+        plt.xlabel('轮次')
+        plt.ylabel('学习率')
         plt.legend()
         plt.grid(True, alpha=0.3)
+        plt.yscale('log')  # 使用对数刻度
     else:
         # 如果没有学习率历史，显示训练时间
         plt.text(0.5, 0.5, '训练完成', ha='center', va='center', 
@@ -559,10 +514,11 @@ def plot_training_history(history):
     
     plt.tight_layout()
     
-    # 保存图片
+    # 保存图片 - 使用类方法获取路径字符串
     os.makedirs(Config.IMG_DIR, exist_ok=True)
-    plt.savefig(Config.TRAINING_HISTORY_PATH, dpi=300, bbox_inches='tight')
-    log_and_print(f"训练历史图表已保存到: {Config.TRAINING_HISTORY_PATH}")
+    training_history_path = Config.get_training_history_path()  # 修改这里
+    plt.savefig(training_history_path, dpi=300, bbox_inches='tight')
+    log_and_print(f"训练历史图表已保存到: {training_history_path}")
     
     plt.show()
 
@@ -667,26 +623,33 @@ if __name__ == "__main__":
             print_classification_results(val_results, class_names, "验证集")
             
             # 绘制混淆矩阵
-            os.makedirs(Config.IMG_DIR, exist_ok=True)
-            plot_confusion_matrix(val_results['confusion_matrix'], class_names, 
-                                title="验证集混淆矩阵", save_path=Config.CONFUSION_MATRIX_PATH)
-        
-        # 保存模型
-        os.makedirs(Config.MODEL_DIR, exist_ok=True)
-        
-        # 只保存模型参数，避免pickle问题
-        torch.save(model.state_dict(), Config.MODEL_STATE_PATH)
-        log_and_print(f"模型参数已保存为 '{Config.MODEL_STATE_PATH}'")
-        
-        # 尝试保存完整模型，如果失败则跳过
-        try:
-            # 清理模型，移除可能的钩子函数
-            model.eval()
-            torch.save(model, Config.MODEL_FULL_PATH)
-            log_and_print(f"完整模型已保存为 '{Config.MODEL_FULL_PATH}'")
-        except Exception as e:
-            log_and_print(f"保存完整模型失败: {e}")
-            log_and_print("仅保存了模型参数，可以通过加载参数到新模型实例来使用")
+            # 绘制混淆矩阵
+            if val_results and 'confusion_matrix' in val_results:
+                os.makedirs(Config.IMG_DIR, exist_ok=True)
+                confusion_matrix_path = Config.get_confusion_matrix_path()  # 修改这里
+                plot_confusion_matrix(val_results['confusion_matrix'], class_names, 
+                                    title="验证集混淆矩阵", save_path=confusion_matrix_path)
+            
+            # 保存模型
+            os.makedirs(Config.MODEL_DIR, exist_ok=True)
+            
+            # 获取动态生成的文件路径
+            model_state_path = Config.get_model_state_path()  # 修改这里
+            model_full_path = Config.get_full_model_path()    # 修复：正确的方法名
+            
+            # 只保存模型参数，避免pickle问题
+            torch.save(model.state_dict(), model_state_path)
+            log_and_print(f"模型参数已保存为 '{model_state_path}'")
+            
+            # 尝试保存完整模型，如果失败则跳过
+            try:
+                # 清理模型，移除可能的钩子函数
+                model.eval()
+                torch.save(model, model_full_path)
+                log_and_print(f"完整模型已保存为 '{model_full_path}'")
+            except Exception as e:
+                log_and_print(f"保存完整模型失败: {e}")
+                log_and_print("仅保存了模型参数，可以通过加载参数到新模型实例来使用")
         
         log_and_print("轴承故障诊断CNN模型训练完成！")
         log_and_print(f"完整日志已保存到: {log_file}")
