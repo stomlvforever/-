@@ -803,7 +803,7 @@ if __name__ == "__main__":
         
         # 可视化对比
         print(f"使用 {method} 方法的2D窗口可视化")
-        dataset.visualize_comprehensive(show_raw_signals=True,num_windows_per_class=2,name=method)
+        dataset.visualize_comprehensive(show_raw_signals=True,num_windows_per_class=4,name=method)
         
         # 清理内存
         plt.close('all')
