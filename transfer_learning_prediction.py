@@ -16,9 +16,29 @@ matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 from cnn_model_pytorch import DenseNetCNN, Config
 from bearing_data_loader import BearingDataset
 
+# 在文件顶部，导入部分之后添加
+class SignalProcessor:
+    """信号处理器 - 复用BearingDataset的处理方法"""
+    def __init__(self, window_size=4096, transform_method=Config.TRANSFORM_METHOD):
+        self.window_size = window_size
+        self.transform_method = transform_method
+        
+        # 创建一个临时的BearingDataset实例来使用其方法
+        self._processor = BearingDataset(
+            data_path="dummy",  # 占位符，不会实际使用
+            window_size=window_size,
+            transform_method=transform_method
+        )
+    
+    def signal_to_2d(self, signal, method=None):
+        """转换信号为2D图像"""
+        if method is None:
+            method = self.transform_method
+        return self._processor._signal_to_2d(signal, method=method)
+
 class TargetDomainDataset(Dataset):
     """目标域数据集类"""
-    def __init__(self, data_path, window_size=4096, step_size=2048, transform_to_2d=True):
+    def __init__(self, data_path, window_size=4096, step_size=2048, transform_to_2d=True, transform_method='stft'):
         """
         目标域数据集
         
@@ -27,22 +47,27 @@ class TargetDomainDataset(Dataset):
             window_size: 窗口大小
             step_size: 步长
             transform_to_2d: 是否转换为2D图像
+            transform_method: 2D转换方法 ('stft', 'cwt', 'spectrogram', 'reshape')
         """
         self.data_path = data_path
         self.window_size = window_size
         self.step_size = step_size
         self.transform_to_2d = transform_to_2d
+        self.transform_method = transform_method
         
         self.samples = []
         self.file_labels = []  # 记录每个样本来自哪个文件
         self.file_names = []   # 文件名列表
+        
+        # 创建信号处理器
+        self.signal_processor = SignalProcessor(window_size, transform_method)
         
         # 加载数据
         self._load_data()
         
         # 标准化数据（使用源域的统计量）
         self._normalize_data()
-    
+
     def _load_data(self):
         """加载目标域数据"""
         print("开始加载目标域数据...")
@@ -129,18 +154,9 @@ class TargetDomainDataset(Dataset):
         print(f"目标域数据标准化完成: 均值={self.mean:.4f}, 标准差={self.std:.4f}")
     
     def _signal_to_2d(self, signal):
-        """将1D信号转换为2D图像"""
-        # 确保信号长度为4096 (64*64)
-        if len(signal) != self.window_size:
-            if len(signal) > self.window_size:
-                signal = signal[:self.window_size]
-            else:
-                signal = np.pad(signal, (0, self.window_size - len(signal)), 'constant')
-        
-        # 重塑为64x64的2D图像
-        image_2d = signal.reshape(64, 64)
-        return image_2d
-    
+        """将1D信号转换为2D图像 - 直接使用SignalProcessor"""
+        return self.signal_processor.signal_to_2d(signal)
+
     def __len__(self):
         """返回数据集大小"""
         return len(self.samples)
@@ -320,28 +336,25 @@ def main():
     
     # 路径配置
     target_data_path = "数据集/数据集/目标域数据集"
-    model_path = "model/bearing_fault_cnn_11class.pth"  # 使用11分类模型
+    model_path = "model/bearing_fault_cnn_11class.pth"
     results_dir = "transfer_learning_results"
     
     # 创建结果目录
     os.makedirs(results_dir, exist_ok=True)
     
     # 获取类别名称
-    class_names = [
-        '正常', '内圈故障_0007', '内圈故障_0014', '内圈故障_0021', '内圈故障_0028',
-        '滚动体故障_0007', '滚动体故障_0014', '滚动体故障_0021', '滚动体故障_0028',
-        '外圈故障_0007', '外圈故障_0021'
-    ]
+    class_names = Config.CLASS_NAMES  # 直接使用Config中的类别名称
     
     # 加载训练好的模型
     model = load_trained_model(model_path, device)
     
-    # 创建目标域数据集
+    # 创建目标域数据集 - 使用与训练时相同的转换方法
     target_dataset = TargetDomainDataset(
         data_path=target_data_path,
         window_size=Config.WINDOW_SIZE,
         step_size=Config.WINDOW_SIZE // 2,  # 50% 重叠
-        transform_to_2d=True
+        transform_to_2d=True,
+        transform_method=Config.TRANSFORM_METHOD  # 使用与训练时相同的方法
     )
     
     # 创建数据加载器
@@ -364,7 +377,7 @@ def main():
     results_df = save_prediction_results(file_predictions, class_names, csv_path)
     
     # 绘制预测结果可视化
-    plot_path = os.path.join(results_dir, "prediction_visualization.png")
+    plot_path = os.path.join(results_dir, f"{Config.TRANSFORM_METHOD}_prediction_visualization.png")
     plot_prediction_results(file_predictions, class_names, plot_path)
     
     # 统计分析
