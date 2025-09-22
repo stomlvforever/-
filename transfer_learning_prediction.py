@@ -13,74 +13,144 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 # 导入模型和配置
-from cnn_model_pytorch import DenseNetCNN, Config
+from cnn_model_pytorch import DenseNetCNN
 from bearing_data_loader import BearingDataset
+from config import Config
 
-# 在文件顶部，导入部分之后添加
-class SignalProcessor:
-    """信号处理器 - 复用BearingDataset的处理方法"""
-    def __init__(self, window_size=4096, transform_method=Config.TRANSFORM_METHOD):
-        self.window_size = window_size
-        self.transform_method = transform_method
-        
-        # 创建一个临时的BearingDataset实例来使用其方法
-        self._processor = BearingDataset(
-            data_path="dummy",  # 占位符，不会实际使用
-            window_size=window_size,
-            transform_method=transform_method
-        )
-    
-    def signal_to_2d(self, signal, method=None):
-        """转换信号为2D图像"""
-        if method is None:
-            method = self.transform_method
-        return self._processor._signal_to_2d(signal, method=method)
+# 删除SignalProcessor类，直接使用BearingDataset
 
 class TargetDomainDataset(Dataset):
-    """目标域数据集类"""
-    def __init__(self, data_path, window_size=4096, step_size=2048, transform_to_2d=True, transform_method='stft'):
+    """目标域数据集类 - 直接使用BearingDataset的功能"""
+    def __init__(self, data_path, window_size=Config.WINDOW_SIZE, transform_method=Config.TRANSFORM_METHOD, target_fs=32000):
         """
         目标域数据集
         
         Args:
             data_path: 目标域数据路径
-            window_size: 窗口大小
-            step_size: 步长
-            transform_to_2d: 是否转换为2D图像
-            transform_method: 2D转换方法 ('stft', 'cwt', 'spectrogram', 'reshape')
+            window_size: 基准窗口大小 (12kHz时的窗口大小)
+            transform_method: 2D转换方法
+            target_fs: 目标域数据的采样频率
         """
         self.data_path = data_path
-        self.window_size = window_size
-        self.step_size = step_size
-        self.transform_to_2d = transform_to_2d
+        self.target_fs = target_fs
         self.transform_method = transform_method
+        self.transform_to_2d = True
+        
+        # 计算32kHz对应的窗口大小和步长
+        # 直接使用BearingDataset的静态方法逻辑
+        base_fs = 12000  # 基准采样频率
+        self.window_size = int(window_size * target_fs / base_fs)
+        self.step_size = self.window_size // 2
+        
+        print(f"目标域数据采样频率: {target_fs}Hz")
+        print(f"自适应窗口大小: {self.window_size}")
+        print(f"自适应步长: {self.step_size}")
         
         self.samples = []
-        self.file_labels = []  # 记录每个样本来自哪个文件
-        self.file_names = []   # 文件名列表
-        
-        # 创建信号处理器
-        self.signal_processor = SignalProcessor(window_size, transform_method)
+        self.file_labels = []
+        self.file_names = []
         
         # 加载数据
         self._load_data()
         
-        # 标准化数据（使用源域的统计量）
+        # 标准化数据
         self._normalize_data()
+
+    def _sliding_window_sampling(self, signal, fs):
+        """滑窗采样 - 复制BearingDataset的逻辑"""
+        windows = []
+        signal = signal.flatten()
+        
+        for i in range(0, len(signal) - self.window_size + 1, self.step_size):
+            window = signal[i:i + self.window_size]
+            windows.append(window)
+        
+        return windows
+
+    def _signal_to_2d(self, signal):
+        """转换信号为2D图像"""
+        if self.transform_method == 'reshape':
+            # 直接reshape为64x64
+            target_size = 64 * 64
+            if len(signal) > target_size:
+                signal = signal[:target_size]
+            elif len(signal) < target_size:
+                signal = np.pad(signal, (0, target_size - len(signal)), 'constant')
+            return signal.reshape(64, 64)
+        
+        elif self.transform_method == 'stft':
+            from scipy import signal as scipy_signal
+            f, t, Zxx = scipy_signal.stft(signal, fs=self.target_fs, nperseg=128)
+            magnitude = np.abs(Zxx)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if magnitude.shape != (64, 64):
+                zoom_factors = (64/magnitude.shape[0], 64/magnitude.shape[1])
+                magnitude = zoom(magnitude, zoom_factors)
+            return magnitude
+        
+        elif self.transform_method == 'cwt':
+            import pywt
+            scales = np.arange(1, 65)
+            coefficients, _ = pywt.cwt(signal, scales, 'morl')
+            magnitude = np.abs(coefficients)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if magnitude.shape != (64, 64):
+                zoom_factors = (64/magnitude.shape[0], 64/magnitude.shape[1])
+                magnitude = zoom(magnitude, zoom_factors)
+            return magnitude
+        
+        elif self.transform_method == 'spectrogram':
+            from scipy import signal as scipy_signal
+            f, t, Sxx = scipy_signal.spectrogram(signal, fs=self.target_fs)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if Sxx.shape != (64, 64):
+                zoom_factors = (64/Sxx.shape[0], 64/Sxx.shape[1])
+                Sxx = zoom(Sxx, zoom_factors)
+            return Sxx
+        
+        else:
+            raise ValueError(f"不支持的转换方法: {self.transform_method}")
+
+    def _normalize_data(self):
+        """标准化数据"""
+        if len(self.samples) == 0:
+            print("警告: 没有样本数据需要标准化")
+            return
+            
+        print(f"开始标准化数据，总样本数: {len(self.samples)}")
+        
+        # 计算全局均值和标准差
+        all_data = np.concatenate(self.samples, axis=0)
+        global_mean = np.mean(all_data)
+        global_std = np.std(all_data)
+        
+        print(f"全局均值: {global_mean:.6f}, 全局标准差: {global_std:.6f}")
+        
+        # 标准化每个样本
+        for i in range(len(self.samples)):
+            self.samples[i] = (self.samples[i] - global_mean) / (global_std + 1e-8)
+        
+        # 统计窗口长度分布
+        window_lengths = [len(sample) for sample in self.samples]
+        unique_lengths = np.unique(window_lengths)
+        print(f"窗口长度分布: {dict(zip(unique_lengths, [window_lengths.count(l) for l in unique_lengths]))}")
+        
+        print("数据标准化完成")
 
     def _load_data(self):
         """加载目标域数据"""
         print("开始加载目标域数据...")
         
-        # 获取所有.mat文件
         mat_files = [f for f in os.listdir(self.data_path) if f.endswith('.mat')]
-        mat_files.sort()  # 按字母顺序排序
+        mat_files.sort()
         
         for file_idx, file_name in enumerate(mat_files):
             file_path = os.path.join(self.data_path, file_name)
             
             try:
-                # 加载.mat文件
                 mat_data = sio.loadmat(file_path)
                 
                 # 查找振动数据
@@ -95,8 +165,8 @@ class TargetDomainDataset(Dataset):
                             break
                 
                 if vibration_data is not None:
-                    # 滑窗采样
-                    windows = self._sliding_window_sampling(vibration_data)
+                    # 使用自己的滑窗采样方法
+                    windows = self._sliding_window_sampling(vibration_data, fs=self.target_fs)
                     
                     # 添加到数据集
                     for window in windows:
@@ -110,53 +180,54 @@ class TargetDomainDataset(Dataset):
                 print(f"  错误: {file_name} - {e}")
         
         print(f"目标域数据加载完成: 总共 {len(self.samples)} 个样本，来自 {len(self.file_names)} 个文件")
-    
-    def _sliding_window_sampling(self, signal_data):
-        """滑动窗口采样"""
-        windows = []
-        signal_length = len(signal_data)
-        
-        # 计算窗口数量
-        num_windows = (signal_length - self.window_size) // self.step_size + 1
-        
-        for i in range(num_windows):
-            start_idx = i * self.step_size
-            end_idx = start_idx + self.window_size
-            
-            if end_idx <= signal_length:
-                window = signal_data[start_idx:end_idx]
-                windows.append(window)
-        
-        return windows
-    
-    def _normalize_data(self):
-        """标准化数据 - 使用源域的统计量"""
-        if len(self.samples) == 0:
-            print("警告: 没有样本数据可以标准化")
-            return
-            
-        print("正在标准化目标域数据...")
-        
-        # 这里可以使用源域的均值和标准差，或者计算目标域的统计量
-        # 为了简化，我们计算目标域的统计量
-        all_data = np.array(self.samples)
-        self.mean = np.mean(all_data)
-        self.std = np.std(all_data)
-        
-        # 避免除零错误
-        if self.std == 0:
-            self.std = 1.0
-        
-        # 标准化每个样本
-        for i in range(len(self.samples)):
-            self.samples[i] = (self.samples[i] - self.mean) / self.std
-        
-        print(f"目标域数据标准化完成: 均值={self.mean:.4f}, 标准差={self.std:.4f}")
-    
-    def _signal_to_2d(self, signal):
-        """将1D信号转换为2D图像 - 直接使用SignalProcessor"""
-        return self.signal_processor.signal_to_2d(signal)
 
+    def _signal_to_2d(self, signal):
+        """转换信号为2D图像"""
+        if self.transform_method == 'reshape':
+            # 直接reshape为64x64
+            target_size = 64 * 64
+            if len(signal) > target_size:
+                signal = signal[:target_size]
+            elif len(signal) < target_size:
+                signal = np.pad(signal, (0, target_size - len(signal)), 'constant')
+            return signal.reshape(64, 64)
+        
+        elif self.transform_method == 'stft':
+            from scipy import signal as scipy_signal
+            f, t, Zxx = scipy_signal.stft(signal, fs=self.target_fs, nperseg=128)
+            magnitude = np.abs(Zxx)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if magnitude.shape != (64, 64):
+                zoom_factors = (64/magnitude.shape[0], 64/magnitude.shape[1])
+                magnitude = zoom(magnitude, zoom_factors)
+            return magnitude
+        
+        elif self.transform_method == 'cwt':
+            import pywt
+            scales = np.arange(1, 65)
+            coefficients, _ = pywt.cwt(signal, scales, 'morl')
+            magnitude = np.abs(coefficients)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if magnitude.shape != (64, 64):
+                zoom_factors = (64/magnitude.shape[0], 64/magnitude.shape[1])
+                magnitude = zoom(magnitude, zoom_factors)
+            return magnitude
+        
+        elif self.transform_method == 'spectrogram':
+            from scipy import signal as scipy_signal
+            f, t, Sxx = scipy_signal.spectrogram(signal, fs=self.target_fs)
+            # 调整到64x64
+            from scipy.ndimage import zoom
+            if Sxx.shape != (64, 64):
+                zoom_factors = (64/Sxx.shape[0], 64/Sxx.shape[1])
+                Sxx = zoom(Sxx, zoom_factors)
+            return Sxx
+        
+        else:
+            raise ValueError(f"不支持的转换方法: {self.transform_method}")
+        
     def __len__(self):
         """返回数据集大小"""
         return len(self.samples)
@@ -334,13 +405,17 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
     
-    # 路径配置
+    # 路径配置 - 使用动态生成的模型路径
     target_data_path = "数据集/数据集/目标域数据集"
-    model_path = "model/bearing_fault_cnn_11class.pth"
-    results_dir = "transfer_learning_results"
+    model_path = Config.get_model_state_path()  # 根据TRANSFORM_METHOD动态获取
+    results_dir = f"transfer_learning_results_{Config.TRANSFORM_METHOD}"  # 结果目录也区分方法
     
     # 创建结果目录
     os.makedirs(results_dir, exist_ok=True)
+    
+    print(f"当前使用转换方法: {Config.TRANSFORM_METHOD}")
+    print(f"加载模型: {model_path}")
+    print(f"结果保存到: {results_dir}")
     
     # 获取类别名称
     class_names = Config.CLASS_NAMES  # 直接使用Config中的类别名称
@@ -352,9 +427,8 @@ def main():
     target_dataset = TargetDomainDataset(
         data_path=target_data_path,
         window_size=Config.WINDOW_SIZE,
-        step_size=Config.WINDOW_SIZE // 2,  # 50% 重叠
-        transform_to_2d=True,
-        transform_method=Config.TRANSFORM_METHOD  # 使用与训练时相同的方法
+        transform_method=Config.TRANSFORM_METHOD,  # 使用与训练时相同的方法
+        target_fs=32000  # 目标域数据的采样频率
     )
     
     # 创建数据加载器
@@ -373,7 +447,7 @@ def main():
               f"样本数: {pred_info['sample_count']})")
     
     # 保存预测结果
-    csv_path = os.path.join(results_dir, "target_domain_predictions.csv")
+    csv_path = os.path.join(results_dir, f"{Config.TRANSFORM_METHOD}_target_domain_predictions.csv")
     results_df = save_prediction_results(file_predictions, class_names, csv_path)
     
     # 绘制预测结果可视化
