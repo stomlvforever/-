@@ -26,11 +26,11 @@ class Config:
     # 数据相关参数
     DATA_PATH = r"数据集\数据集\源域数据集"
     WINDOW_SIZE = 4096  # 64*64 = 4096，匹配CNN输入
-    OVERLAP_RATIO = 0.5  # 50%重叠
+    OVERLAP_RATIO = 0.5  # 重叠
     TRAIN_RATIO = 0.9  # 训练集比例
     
     # 2D转换方法配置 - 新增
-    TRANSFORM_METHOD = 'cwt'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
+    TRANSFORM_METHOD = 'stft'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
     
     # 模型相关参数
     NUM_CLASSES = 11  # 从12改为11
