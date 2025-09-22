@@ -8,21 +8,37 @@ import matplotlib
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
+# 导入配置
+try:
+    from config import Config
+    # 计算step_size
+    STEP_SIZE = int(Config.WINDOW_SIZE * (1 - Config.OVERLAP_RATIO))
+except ImportError:
+    # 如果导入失败，使用默认值
+    class Config:
+        WINDOW_SIZE = 4096
+        OVERLAP_RATIO = 0.5
+        BATCH_SIZE = 32
+        TRAIN_RATIO = 0.8
+        TRANSFORM_METHOD = 'stft'
+    STEP_SIZE = 2048
+
 class BearingDataset(Dataset):
-    def __init__(self, data_path, window_size=8192, step_size=2048, transform_to_2d=False, transform_method='stft'):
+    def __init__(self, data_path, window_size=Config.WINDOW_SIZE, step_size=STEP_SIZE, transform_to_2d=False, transform_method='stft'):
         """
         轴承故障数据集
         
         Args:
             data_path: 数据路径
-            window_size: 滑动窗口大小
-            step_size: 滑动步长
+            window_size: 滑动窗口大小，如果为None则使用配置文件中的值
+            step_size: 滑动步长，如果为None则使用配置文件中的值
             transform_to_2d: 是否转换为2D
-            transform_method: 2D转换方法 ('stft', 'cwt', 'spectrogram', 'reshape')
+            transform_method: 2D转换方法
         """
         self.data_path = data_path
+        # 使用配置文件中的参数，如果没有传入的话
         self.window_size = window_size
-        self.step_size = step_size
+        self.step_size = step_size 
         self.transform_to_2d = transform_to_2d
         self.transform_method = transform_method
         
@@ -49,25 +65,32 @@ class BearingDataset(Dataset):
         self._print_class_distribution()
     
     def _load_data(self):
-        """加载数据"""
+        """加载数据 - 遍历所有数据源并根据文件夹名称确定采样频率"""
         print("开始加载轴承数据...")
         
-        # 处理正常数据
-        normal_folder = os.path.join(self.data_path, 'Normal')
-        if os.path.exists(normal_folder):
-            print("处理正常数据...")
-            self._process_normal_data(normal_folder, fs=12000)
+        # 定义所有数据源及其采样频率
+        data_sources = [
+            ('48kHz_Normal_data', 48000, 'normal'),
+            ('48kHz_DE_data', 48000, 'fault'),
+            ('12kHz_DE_data', 12000, 'fault'), 
+            ('12kHz_FE_data', 12000, 'fault')
+        ]
         
-        # 处理故障数据
-        fault_folder = os.path.join(self.data_path, '12kHz_DE_data')
-        if os.path.exists(fault_folder):
-            print("处理故障数据...")
-            self._process_fault_data_detailed(fault_folder, fs=12000)
+        for folder_name, fs, data_type in data_sources:
+            folder_path = os.path.join(self.data_path, folder_name)
+            if os.path.exists(folder_path):
+                print(f"处理 {folder_name} 数据 (采样频率: {fs}Hz)...")
+                if data_type == 'normal':
+                    self._process_normal_data_with_fs(folder_path, fs)
+                else:
+                    self._process_fault_data_with_fs(folder_path, fs)
+            else:
+                print(f"警告: 未找到 {folder_name} 文件夹")
         
         print(f"数据加载完成: 总共 {len(self.samples)} 个样本")
     
-    def _process_normal_data(self, normal_folder, fs):
-        """处理正常数据"""
+    def _process_normal_data_with_fs(self, normal_folder, fs):
+        """处理正常数据 - 使用指定采样频率"""
         for file_name in os.listdir(normal_folder):
             if file_name.endswith('.mat'):
                 file_path = os.path.join(normal_folder, file_name)
@@ -85,7 +108,7 @@ class BearingDataset(Dataset):
                                 break
                     
                     if vibration_data is not None:
-                        # 滑窗采样
+                        # 使用指定采样频率进行滑窗采样
                         windows = self._sliding_window_sampling(vibration_data, fs=fs)
                         
                         # 添加到数据集
@@ -99,13 +122,13 @@ class BearingDataset(Dataset):
                                 'fs': fs
                             })
                         
-                        print(f"  {file_name}: 生成 {len(windows)} 个正常样本")
+                        print(f"  {file_name}: 采样频率 {fs}Hz, 生成 {len(windows)} 个正常样本")
                         
                 except Exception as e:
                     print(f"  错误: {file_name} - {e}")
     
-    def _process_fault_data_detailed(self, fault_folder_path, fs):
-        """处理故障数据 - 详细分类"""
+    def _process_fault_data_with_fs(self, fault_folder_path, fs):
+        """处理故障数据 - 使用指定采样频率"""
         fault_types = ['B', 'IR', 'OR']
         
         for fault_type in fault_types:
@@ -119,33 +142,28 @@ class BearingDataset(Dataset):
                 # 外圈故障只处理Opposite方向
                 opposite_path = os.path.join(fault_path, 'Opposite')
                 if os.path.exists(opposite_path):
-                    self._process_fault_sizes(opposite_path, fault_type, fs)
+                    self._process_fault_sizes_with_fs(opposite_path, fault_type, fs)
             else:
                 # 内圈和滚动体故障处理所有尺寸
-                self._process_fault_sizes(fault_path, fault_type, fs)
+                self._process_fault_sizes_with_fs(fault_path, fault_type, fs)
     
-    def _process_fault_sizes(self, fault_path, fault_type, fs):
-        """处理特定故障类型的不同尺寸"""
-        # 定义尺寸映射 - 根据实际数据集
+    def _process_fault_sizes_with_fs(self, fault_path, fault_type, fs):
+        """处理特定故障类型的不同尺寸 - 使用指定采样频率"""
+        # 定义尺寸映射
         if fault_type == 'OR':
-            # 外圈故障只有0007和0021两种尺寸（根据实际数据集）
-            size_folders = ['0007', '0021']
+            size_folders = ['0007', '0021']  # 外圈故障只有这两种尺寸
         else:
-            # 内圈和滚动体故障有四种尺寸
-            size_folders = ['0007', '0014', '0021', '0028']
+            size_folders = ['0007', '0014', '0021', '0028']  # 内圈和滚动体故障
         
         for size_folder in size_folders:
             size_path = os.path.join(fault_path, size_folder)
             if os.path.exists(size_path):
                 # 构建详细故障标签
                 detailed_fault_label = f"{fault_type}_{size_folder}"
-                
-                # 检查是否在映射中
-                if detailed_fault_label in self.fault_mapping:
-                    self._process_size_folder(size_path, detailed_fault_label, fs)
+                self._process_size_folder_with_fs(size_path, detailed_fault_label, fs)
     
-    def _process_size_folder(self, size_path, detailed_fault_label, fs):
-        """处理特定尺寸文件夹中的所有.mat文件"""
+    def _process_size_folder_with_fs(self, size_path, detailed_fault_label, fs):
+        """处理特定尺寸文件夹中的所有.mat文件 - 使用指定采样频率"""
         sample_count = 0
         
         for file_name in os.listdir(size_path):
@@ -165,7 +183,7 @@ class BearingDataset(Dataset):
                                 break
                     
                     if vibration_data is not None:
-                        # 滑窗采样
+                        # 使用指定采样频率进行滑窗采样
                         windows = self._sliding_window_sampling(vibration_data, fs=fs)
                         
                         # 添加到数据集
@@ -184,9 +202,9 @@ class BearingDataset(Dataset):
                         
                 except Exception as e:
                     print(f"  错误: {file_name} - {e}")
-        
-        if sample_count > 0:
-            print(f"  {detailed_fault_label}: 生成 {sample_count} 个样本")
+            
+            if sample_count > 0:
+                print(f"  {detailed_fault_label}: 采样频率 {fs}Hz, 总共生成 {sample_count} 个样本")
 
     def _get_window_size_for_fs(self, fs):
         """根据采样频率计算窗口大小"""
@@ -202,15 +220,14 @@ class BearingDataset(Dataset):
             return adjusted_window_size
     
     def _get_step_size_for_fs(self, fs):
-        """根据采样频率计算步长"""
-        # 基准: 12kHz采样频率下步长为self.step_size
-        base_fs = 12000
-        if fs == base_fs:
-            return self.step_size
-        else:
-            # 按采样频率比例调整步长
-            adjusted_step_size = int(self.step_size * fs / base_fs)
-            return adjusted_step_size
+        """根据采样频率和重叠比例计算步长"""
+        # 先获取对应采样频率的窗口大小
+        window_size = self._get_window_size_for_fs(fs)
+        
+        # 根据重叠比例计算步长
+        step_size = int(window_size * (1 - Config.OVERLAP_RATIO))
+        
+        return step_size
 
     def _sliding_window_sampling(self, signal_data, fs=12000):
         """滑动窗口采样 - 根据采样频率调整窗口大小"""
@@ -246,19 +263,28 @@ class BearingDataset(Dataset):
 
 
     def _normalize_data(self):
-        """标准化数据"""
+        """标准化数据 - 处理不同长度的窗口"""
         if len(self.samples) == 0:
             print("警告: 没有样本数据可以标准化")
             return
             
         print("正在标准化数据...")
         
-        # 将所有样本合并用于计算统计量
-        all_data = np.array(self.samples)
+        # 检查窗口长度
+        window_lengths = [len(sample) for sample in self.samples]
+        unique_lengths = set(window_lengths)
+        
+        print(f"检测到窗口长度: {unique_lengths}")
+        
+        # 收集所有数据点用于计算全局统计量
+        all_values = []
+        for sample in self.samples:
+            all_values.extend(sample.flatten())
         
         # 计算全局均值和标准差
-        self.mean = np.mean(all_data)
-        self.std = np.std(all_data)
+        all_values = np.array(all_values)
+        self.mean = np.mean(all_values)
+        self.std = np.std(all_values)
         
         # 避免除零错误
         if self.std == 0:
@@ -269,6 +295,12 @@ class BearingDataset(Dataset):
             self.samples[i] = (self.samples[i] - self.mean) / self.std
         
         print(f"数据标准化完成: 均值={self.mean:.4f}, 标准差={self.std:.4f}")
+        
+        # 统计窗口长度分布
+        length_counts = {}
+        for length in window_lengths:
+            length_counts[length] = length_counts.get(length, 0) + 1
+        print(f"窗口长度分布: {length_counts}")
     
     def _signal_to_2d(self, signal, method='stft'):
         """
@@ -278,26 +310,32 @@ class BearingDataset(Dataset):
             signal: 输入的1D信号
             method: 转换方法 ('stft', 'cwt', 'spectrogram', 'reshape')
         """
-        # 确保信号长度为window_size
-        if len(signal) != self.window_size:
-            if len(signal) > self.window_size:
-                signal = signal[:self.window_size]
-            else:
-                signal = np.pad(signal, (0, self.window_size - len(signal)), 'constant')
+        # 移除强制截断！让信号保持原始长度进行2D转换
+        # 注释掉这段强制截断的代码：
+        # if len(signal) != self.window_size:
+        #     if len(signal) > self.window_size:
+        #         signal = signal[:self.window_size]  # 删除这个截断！
+        #     else:
+        #         signal = np.pad(signal, (0, self.window_size - len(signal)), 'constant')
         
         if method == 'stft':
-            # 短时傅里叶变换 (STFT) - 按照标准公式实现
+            # 短时傅里叶变换 (STFT) - 根据信号长度动态调整参数
             from scipy import signal as scipy_signal
             
-            # STFT参数设置
-            nperseg = 256  # 窗口长度
+            # 根据信号长度动态调整STFT参数
+            signal_length = len(signal)
+            if signal_length <= 8192:
+                nperseg = 256  # 12kHz数据使用较小窗口
+            else:
+                nperseg = 1024  # 48kHz数据使用较大窗口
+            
             noverlap = nperseg // 2  # 50%重叠
             nfft = nperseg  # FFT点数
             
-            # 使用汉宁窗（常用的窗函数）
+            # 使用汉宁窗
             window = 'hann'
             
-            # 计算STFT: F(ω) = ∫ f(t) * w(t-τ) * e^(-jωt) dt
+            # 计算STFT
             f, t, Zxx = scipy_signal.stft(
                 signal, 
                 fs=12000,  # 采样频率
@@ -310,11 +348,11 @@ class BearingDataset(Dataset):
                 padded=False
             )
             
-            # 计算幅度谱 |STFT(f,t)|
+            # 计算幅度谱
             magnitude = np.abs(Zxx)
             
             # 对数变换以增强动态范围
-            log_magnitude = 20 * np.log10(magnitude + 1e-10)  # 转换为dB
+            log_magnitude = 20 * np.log10(magnitude + 1e-10)
             
             # 调整到目标尺寸 (64x64)
             target_size = 64
@@ -326,65 +364,62 @@ class BearingDataset(Dataset):
             return image_2d
             
         elif method == 'cwt':
-            # 连续小波变换 (CWT) - 按照标准公式实现
+            # 连续小波变换 - 处理不同长度的信号
             try:
                 import pywt
                 
-                # 选择Morlet小波作为母小波 φ(t)
-                # Morlet小波: φ(t) = π^(-1/4) * e^(jω₀t) * e^(-t²/2)
-                wavelet = 'cmor1.5-1.0'  # 复Morlet小波，中心频率1.0，带宽1.5
+                # 根据信号长度调整尺度范围
+                signal_length = len(signal)
+                if signal_length <= 8192:
+                    scales = np.arange(1, 65)  # 12kHz数据
+                else:
+                    scales = np.arange(1, 129)  # 48kHz数据，使用更多尺度
                 
-                # 计算尺度参数 a
-                # 根据公式 Wf(a,b) = |a|^(-1/2) ∫ f(t) φ*((t-b)/a) dt
-                scales = np.logspace(0, 2, 64)  # 对数分布的64个尺度，从1到100
+                # 选择Morlet小波
+                wavelet = 'morl'
                 
-                # 计算CWT系数
-                coefficients, frequencies = pywt.cwt(
-                    signal, 
-                    scales, 
-                    wavelet, 
-                    sampling_period=1/12000  # 采样周期
-                )
+                # 计算CWT
+                coefficients, frequencies = pywt.cwt(signal, scales, wavelet)
                 
-                # 计算幅度 |Wf(a,b)|
+                # 取幅度
                 magnitude = np.abs(coefficients)
                 
                 # 对数变换
-                log_magnitude = 20 * np.log10(magnitude + 1e-10)  # 转换为dB
+                log_magnitude = 20 * np.log10(magnitude + 1e-10)
                 
-                # 确保输出为64x64
-                if log_magnitude.shape != (64, 64):
-                    from scipy.ndimage import zoom
-                    zoom_factor_0 = 64 / log_magnitude.shape[0]
-                    zoom_factor_1 = 64 / log_magnitude.shape[1]
-                    image_2d = zoom(log_magnitude, (zoom_factor_0, zoom_factor_1))
-                else:
-                    image_2d = log_magnitude
+                # 调整到64x64
+                target_size = 64
+                from scipy.ndimage import zoom
+                zoom_factor_0 = target_size / log_magnitude.shape[0]
+                zoom_factor_1 = target_size / log_magnitude.shape[1]
+                image_2d = zoom(log_magnitude, (zoom_factor_0, zoom_factor_1))
                 
                 return image_2d
                 
             except ImportError:
-                print("警告: pywt未安装，回退到STFT方法")
-                return self._signal_to_2d(signal, method='stft')
-                
-        elif method == 'spectrogram':
-            # 功率谱密度图 - 基于STFT的能量分布
+                print("警告: 未安装pywt库，使用reshape方法")
+                method = 'reshape'
+        
+        if method == 'spectrogram':
+            # 功率谱密度
             from scipy import signal as scipy_signal
             
-            # 计算功率谱密度 |STFT(f,t)|²
+            # 根据信号长度调整参数
+            signal_length = len(signal)
+            if signal_length <= 8192:
+                nperseg = 256
+            else:
+                nperseg = 1024
+                
             f, t, Sxx = scipy_signal.spectrogram(
                 signal, 
                 fs=12000,
-                window='hann',
-                nperseg=256,
-                noverlap=128,
-                nfft=256,
-                return_onesided=True,
-                scaling='density'
+                nperseg=nperseg,
+                noverlap=nperseg//2
             )
             
             # 对数变换
-            log_Sxx = 10 * np.log10(Sxx + 1e-10)  # 功率谱的dB表示
+            log_Sxx = 10 * np.log10(Sxx + 1e-10)
             
             # 调整到64x64
             target_size = 64
@@ -394,137 +429,191 @@ class BearingDataset(Dataset):
             image_2d = zoom(log_Sxx, (zoom_factor_0, zoom_factor_1))
             
             return image_2d
+        
+        elif method == 'reshape':
+            # 直接reshape方法 - 处理不同长度
+            signal_length = len(signal)
             
-        else:
-            # 原始reshape方法（保留作为对比）
-            sqrt_size = int(np.sqrt(self.window_size))
-            if sqrt_size * sqrt_size == self.window_size:
-                image_2d = signal.reshape(sqrt_size, sqrt_size)
+            # 找到最接近的平方数
+            sqrt_len = int(np.sqrt(signal_length))
+            target_len = sqrt_len * sqrt_len
+            
+            # 调整信号长度
+            if signal_length > target_len:
+                signal = signal[:target_len]
             else:
-                # 寻找最接近正方形的因子分解
-                factors = []
-                for i in range(1, int(np.sqrt(self.window_size)) + 1):
-                    if self.window_size % i == 0:
-                        factors.append((i, self.window_size // i))
-                
-                best_factor = min(factors, key=lambda x: abs(x[0] - x[1]))
-                image_2d = signal.reshape(best_factor[0], best_factor[1])
+                signal = np.pad(signal, (0, target_len - signal_length), 'constant')
+            
+            # reshape为方形
+            image_2d = signal.reshape(sqrt_len, sqrt_len)
+            
+            # 调整到64x64
+            if sqrt_len != 64:
+                from scipy.ndimage import zoom
+                zoom_factor = 64 / sqrt_len
+                image_2d = zoom(image_2d, zoom_factor)
             
             return image_2d
-
-    def visualize_comprehensive(self, show_raw_signals=True, num_windows_per_class=5,name=''):
-        """
-        综合可视化函数：可以选择是否显示原始信号
         
-        Args:
-            show_raw_signals: 是否显示原始信号（True=信号+窗口，False=仅窗口对比）
-            num_windows_per_class: 每个类别显示的窗口数量
-            name: 保存文件名的前缀
-        """
-        print(f"生成{'信号和窗口' if show_raw_signals else '2D窗口对比'}可视化...")
-        
-        # 获取每个类别的原始信号和样本（只收集一次）
-        class_data = self._collect_class_data()
-        class_names = self.get_class_names()
-        num_classes = len(class_names)
-        
-        if show_raw_signals:
-            # 原始模式：每个类别一行，包含原始信号和5个2D窗口
-            fig = plt.figure(figsize=(24, 4 * num_classes))
-            cols = 6  # 1个原始信号 + 5个2D窗口
-            
-            for class_idx in range(num_classes):
-                if class_idx not in class_data:
-                    continue
-                    
-                raw_signal = class_data[class_idx]['raw_signal']
-                windows = class_data[class_idx]['windows']
-                
-                # 每个类别占一行，6个子图
-                row_start = class_idx * cols + 1
-                
-                # 1. 原始振动信号
-                ax_signal = plt.subplot(num_classes, cols, row_start)
-                ax_signal.plot(raw_signal[:min(50000, len(raw_signal))], 'b-', linewidth=0.5)
-                ax_signal.set_title(f'{class_names[class_idx]}\n原始信号', fontsize=10)
-                ax_signal.set_xlabel('采样点')
-                ax_signal.set_ylabel('振幅')
-                ax_signal.grid(True, alpha=0.3)
-                
-                # 标记前5个窗口的位置
-                colors = ['red', 'green', 'orange', 'purple', 'brown']
-                for i in range(min(num_windows_per_class, len(windows))):
-                    start_idx = i * self.step_size
-                    end_idx = start_idx + self.window_size
-                    if end_idx <= len(raw_signal):
-                        ax_signal.axvspan(start_idx, end_idx, alpha=0.2, color=colors[i])
-                
-                # 2-6. 2D窗口
-                for window_idx in range(num_windows_per_class):
-                    ax_2d = plt.subplot(num_classes, cols, row_start + 1 + window_idx)
-                    
-                    if window_idx < len(windows):
-                        # 关键修复：传递正确的transform_method参数
-                        window_2d = self._signal_to_2d(windows[window_idx], method=self.transform_method)
-                        im = ax_2d.imshow(window_2d, cmap='viridis', aspect='auto')
-                        ax_2d.set_title(f'窗口 {window_idx + 1}', fontsize=9)
-                        plt.colorbar(im, ax=ax_2d, fraction=0.046, pad=0.04)
-                    else:
-                        ax_2d.text(0.5, 0.5, '无数据', ha='center', va='center', 
-                                 transform=ax_2d.transAxes, fontsize=10)
-                    
-                    ax_2d.set_xticks([])
-                    ax_2d.set_yticks([])
-            
-            # 添加转换方法信息到图像标题
-            method_name = self.transform_method
-            fig.suptitle(f'轴承故障信号和2D窗口可视化 - {method_name.upper()}方法', fontsize=16, y=0.98)
-            save_path = f'imgs/{name}_class_signals_and_2d_windows.png' if name else f'imgs/class_signals_and_2d_windows_{method_name}.png'
-            
         else:
-            # 对比模式：只显示2D窗口对比
-            fig, axes = plt.subplots(num_classes, num_windows_per_class, figsize=(20, 3 * num_classes))
+            raise ValueError(f"不支持的转换方法: {method}")
+
+    def visualize_comprehensive(self, show_raw_signals=True, num_windows_per_class=5, name=''):
+        """综合可视化：显示原始信号和2D窗口，在原始信号上标记窗口位置"""
+        
+        # 收集类别数据
+        class_data = self._collect_class_data()
+        
+        if not class_data:
+            print("错误: 没有收集到任何类别数据")
+            return
+        
+        # 获取实际存在的类别
+        available_classes = sorted(class_data.keys())
+        num_classes = len(available_classes)
+        
+        print(f"可视化 {num_classes} 个类别的数据")
+        
+        # 计算布局
+        if show_raw_signals:
+            cols = 1 + num_windows_per_class  # 1个原始信号 + N个2D窗口
+        else:
+            cols = num_windows_per_class
+        
+        rows = num_classes
+        
+        # 创建图形
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 2.5))
+        
+        # 确保axes是2D数组
+        if rows == 1:
+            axes = axes.reshape(1, -1)
+        elif cols == 1:
+            axes = axes.reshape(-1, 1)
+        
+        # 获取类别名称
+        class_names = self.get_class_names()
+        
+        # 定义窗口标记的颜色
+        window_colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive']
+        
+        # 为每个类别绘制图形
+        for row_idx, class_idx in enumerate(available_classes):
+            data = class_data[class_idx]
+            raw_signal = data['raw_signal']
+            windows = data['windows']
+            fault_name = data['fault_name']
+            fs = data['fs']
             
-            for class_idx in range(num_classes):
-                for window_idx in range(num_windows_per_class):
-                    ax = axes[class_idx, window_idx] if num_classes > 1 else axes[window_idx]
+            col_idx = 0
+            
+            # 绘制原始信号
+            if show_raw_signals:
+                ax = axes[row_idx, col_idx]
+                time_axis = np.arange(len(raw_signal)) / fs
+                ax.plot(time_axis, raw_signal, 'b-', linewidth=0.5)
+                
+                # 计算窗口参数
+                window_size = self._get_window_size_for_fs(fs)
+                step_size = self._get_step_size_for_fs(fs)
+                
+                # 在原始信号上标记窗口位置
+                num_windows_to_mark = min(num_windows_per_class, len(windows))
+                for window_idx in range(num_windows_to_mark):
+                    # 计算窗口在原始信号中的起始和结束位置
+                    start_sample = window_idx * step_size
+                    end_sample = start_sample + window_size
                     
-                    if class_idx in class_data and window_idx < len(class_data[class_idx]['windows']):
-                        # 获取窗口数据并转换为2D
-                        window_data = class_data[class_idx]['windows'][window_idx]
-                        # 关键修复：传递正确的transform_method参数
-                        window_2d = self._signal_to_2d(window_data, method=self.transform_method)
+                    # 转换为时间轴
+                    start_time = start_sample / fs
+                    end_time = end_sample / fs
+                    
+                    # 获取窗口对应的信号范围
+                    if end_sample <= len(raw_signal):
+                        window_signal = raw_signal[start_sample:end_sample]
+                        window_min = np.min(window_signal)
+                        window_max = np.max(window_signal)
                         
-                        # 显示2D图像
-                        im = ax.imshow(window_2d, cmap='viridis', aspect='auto')
+                        # 选择颜色
+                        color = window_colors[window_idx % len(window_colors)]
                         
-                        if window_idx == 0:
-                            ax.set_ylabel(f'{class_names[class_idx]}', fontsize=10)
-                        if class_idx == 0:
-                            ax.set_title(f'窗口 {window_idx + 1}', fontsize=10)
+                        # 绘制矩形框标记窗口位置
+                        from matplotlib.patches import Rectangle
+                        rect = Rectangle((start_time, window_min), 
+                                       end_time - start_time, 
+                                       window_max - window_min,
+                                       linewidth=2, 
+                                       edgecolor=color, 
+                                       facecolor='none',
+                                       alpha=0.8)
+                        ax.add_patch(rect)
                         
-                        ax.set_xticks([])
-                        ax.set_yticks([])
-                        
-                        # 添加小的颜色条
-                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                    else:
-                        # 无数据时显示空白
-                        ax.text(0.5, 0.5, '无数据', ha='center', va='center', 
-                               transform=ax.transAxes, fontsize=10)
-                        ax.set_xticks([])
-                        ax.set_yticks([])
+                        # 添加窗口编号标签
+                        ax.text(start_time, window_max, f'W{window_idx+1}', 
+                               color=color, fontsize=8, fontweight='bold',
+                               verticalalignment='bottom')
+                ax.set_title(f'{class_names[class_idx]}\n原始信号 (fs={fs}Hz)')
+                ax.set_xlabel('时间 (s)')
+                ax.set_ylabel('振幅')
+                ax.grid(True, alpha=0.3)
+                col_idx += 1
             
-            method_name = self.transform_method
-            fig.suptitle(f'2D窗口对比 - {method_name.upper()}方法', fontsize=16, y=0.98)
-            save_path = f'imgs/{name}_2d_windows_comparison.png' if name else f'imgs/2d_windows_comparison_{method_name}.png'
+            # 绘制2D窗口
+            for window_idx in range(min(num_windows_per_class, len(windows))):
+                if col_idx >= cols:
+                    break
+                    
+                ax = axes[row_idx, col_idx]
+                window_data = windows[window_idx]
+                
+                # 选择对应的颜色
+                color = window_colors[window_idx % len(window_colors)]
+                
+                # 转换为2D
+                if self.transform_to_2d:
+                    window_2d = self._signal_to_2d(window_data, method=self.transform_method)
+                    
+                    # 显示2D图像
+                    if window_2d.ndim == 2:
+                        im = ax.imshow(window_2d, aspect='auto', cmap='viridis', origin='lower')
+                        ax.set_title(f'窗口 {window_idx+1}\n({self.transform_method.upper()})', 
+                                   color=color, fontweight='bold')
+                        # 添加彩色边框
+                        for spine in ax.spines.values():
+                            spine.set_edgecolor(color)
+                            spine.set_linewidth(2)
+                    else:
+                        # 如果是1D，显示为时域信号
+                        ax.plot(window_2d, color=color)
+                        ax.set_title(f'窗口 {window_idx+1}\n(时域)', 
+                                   color=color, fontweight='bold')
+                else:
+                    # 显示时域窗口
+                    ax.plot(window_data, color=color)
+                    ax.set_title(f'窗口 {window_idx+1}\n(时域)', 
+                               color=color, fontweight='bold')
+                ax.set_xlabel('样本点')
+                ax.set_ylabel('振幅')
+                col_idx += 1
+            
+            # 填充剩余的子图
+            while col_idx < cols:
+                axes[row_idx, col_idx].axis('off')
+                col_idx += 1
         
         plt.tight_layout()
+        
+        # 保存图像
+        if name:
+            save_path = f'imgs_pre/class_signals_and_2d_windows_{name}.png'
+        else:
+            save_path = 'imgs_pre/class_signals_and_2d_windows.png'
+        
+        os.makedirs('imgs_pre', exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        # 移除阻塞的plt.show()
-        plt.draw()
-        plt.pause(0.1)
-        print(f"可视化完成，图像已保存到 {save_path}")
+        print(f"图像已保存到: {save_path}")
+        
+        plt.show()
 
     def _collect_class_data(self):
         """收集每个类别的原始信号和窗口样本"""
@@ -534,67 +623,117 @@ class BearingDataset(Dataset):
         for fault_name, class_idx in self.fault_mapping.items():
             print(f"收集 {fault_name} 类别数据...")
             
-            # 获取原始信号
-            raw_signal = self._load_class_raw_signal(fault_name)
-            if raw_signal is None:
+            # 获取原始信号和采样频率
+            result = self._load_class_raw_signal(fault_name)
+            if result is None or result[0] is None:
+                print(f"警告: 无法加载 {fault_name} 类别数据，跳过...")
                 continue
+                
+            raw_signal, fs = result
             
-            # 生成窗口样本
-            windows = self._sliding_window_sampling(raw_signal)
+            # 使用正确的采样频率生成窗口样本
+            windows = self._sliding_window_sampling(raw_signal, fs=fs)
+            
+            if len(windows) == 0:
+                print(f"警告: {fault_name} 类别没有生成窗口样本，跳过...")
+                continue
             
             class_data[class_idx] = {
                 'raw_signal': raw_signal,
                 'windows': windows[:5],  # 只取前5个窗口
-                'fault_name': fault_name
+                'fault_name': fault_name,
+                'fs': fs  # 保存采样频率信息
             }
+            print(f"成功收集 {fault_name} 类别数据: {len(windows)} 个窗口")
         
+        print(f"总共收集到 {len(class_data)} 个类别的数据")
         return class_data
 
     def _load_class_raw_signal(self, fault_name):
-        """加载指定类别的原始信号"""
+        """加载指定类别的原始信号，返回信号和采样频率"""
         try:
             if fault_name == 'Normal':
-                # 加载正常数据
-                normal_folder = os.path.join(self.data_path, '48kHz_Normal_data')
-                if os.path.exists(normal_folder):
-                    for file_name in os.listdir(normal_folder):
-                        if file_name.endswith('.mat'):
-                            file_path = os.path.join(normal_folder, file_name)
-                            try:
-                                mat_data = sio.loadmat(file_path)
-                                for key in mat_data.keys():
-                                    if not key.startswith('_') and isinstance(mat_data[key], np.ndarray):
-                                        if mat_data[key].ndim == 2 and mat_data[key].shape[0] > mat_data[key].shape[1]:
-                                            return mat_data[key].flatten()
-                            except Exception as e:
-                                continue
+                # 优先加载48kHz正常数据
+                data_sources = [
+                    ('48kHz_Normal_data', 48000),
+                    ('Normal', 12000)  # 备用
+                ]
+                
+                for folder_name, fs in data_sources:
+                    normal_folder = os.path.join(self.data_path, folder_name)
+                    if os.path.exists(normal_folder):
+                        for file_name in os.listdir(normal_folder):
+                            if file_name.endswith('.mat'):
+                                file_path = os.path.join(normal_folder, file_name)
+                                try:
+                                    mat_data = sio.loadmat(file_path)
+                                    for key in mat_data.keys():
+                                        if not key.startswith('_') and isinstance(mat_data[key], np.ndarray):
+                                            if mat_data[key].ndim == 2 and mat_data[key].shape[0] > mat_data[key].shape[1]:
+                                                signal = mat_data[key].flatten()
+                                                print(f"加载 {fault_name} 数据: {file_name}, 采样频率: {fs}Hz, 长度: {len(signal)}")
+                                                return signal, fs
+                                except Exception as e:
+                                    continue
             else:
-                # 加载故障数据
+                # 故障数据搜索优先级：48kHz_DE > 12kHz_DE > 12kHz_FE
                 fault_type = fault_name.split('_')[0]
                 fault_size = fault_name.split('_')[1]
                 
-                # 构建文件路径
-                if fault_type == 'OR':
-                    fault_path = os.path.join(self.data_path, '12kHz_DE_data', fault_type, 'Opposite', fault_size)
-                else:
-                    fault_path = os.path.join(self.data_path, '12kHz_DE_data', fault_type, fault_size)
+                # 搜索路径列表（按优先级排序）
+                search_paths = [
+                    ('48kHz_DE_data', 48000),
+                    ('12kHz_DE_data', 12000),
+                    ('12kHz_FE_data', 12000)
+                ]
                 
-                if os.path.exists(fault_path):
-                    for file_name in os.listdir(fault_path):
-                        if file_name.endswith('.mat'):
-                            file_path = os.path.join(fault_path, file_name)
-                            try:
-                                mat_data = sio.loadmat(file_path)
-                                for key in mat_data.keys():
-                                    if not key.startswith('_') and isinstance(mat_data[key], np.ndarray):
-                                        if mat_data[key].ndim == 2 and mat_data[key].shape[0] > mat_data[key].shape[1]:
-                                            return mat_data[key].flatten()
-                            except Exception as e:
-                                continue
+                for folder_name, fs in search_paths:
+                    base_folder = os.path.join(self.data_path, folder_name)
+                    if not os.path.exists(base_folder):
+                        continue
+                        
+                    # 构建具体路径
+                    if fault_type == 'OR':
+                        # OR故障有多个子文件夹
+                        or_subfolders = ['Centered', 'Opposite', 'Orthogonal']
+                        for subfolder in or_subfolders:
+                            fault_path = os.path.join(base_folder, fault_type, subfolder, fault_size)
+                            if os.path.exists(fault_path):
+                                result = self._try_load_from_path(fault_path, fault_name, fs, folder_name)
+                                if result is not None:
+                                    return result
+                    else:
+                        # IR和B故障直接路径
+                        fault_path = os.path.join(base_folder, fault_type, fault_size)
+                        if os.path.exists(fault_path):
+                            result = self._try_load_from_path(fault_path, fault_name, fs, folder_name)
+                            if result is not None:
+                                return result
+                                        
         except Exception as e:
             print(f"加载 {fault_name} 数据时出错: {e}")
+            
+        return None, None
         
-        return None
+    def _try_load_from_path(self, fault_path, fault_name, fs, data_source):
+        """尝试从指定路径加载数据"""
+        try:
+            for file_name in os.listdir(fault_path):
+                if file_name.endswith('.mat'):
+                    file_path = os.path.join(fault_path, file_name)
+                    try:
+                        mat_data = sio.loadmat(file_path)
+                        for key in mat_data.keys():
+                            if not key.startswith('_') and isinstance(mat_data[key], np.ndarray):
+                                if mat_data[key].ndim == 2 and mat_data[key].shape[0] > mat_data[key].shape[1]:
+                                    signal = mat_data[key].flatten()
+                                    print(f"加载 {fault_name} 数据: {file_name} ({data_source}), 采样频率: {fs}Hz, 长度: {len(signal)}")
+                                    return signal, fs
+                    except Exception as e:
+                        continue
+        except Exception as e:
+            pass
+            return None
 
     # def visualize_2d_window_comparison(self):
     #     """
@@ -778,13 +917,12 @@ def create_bearing_dataloaders(data_path, batch_size=32, train_ratio=0.8, window
     
     return train_loader, test_loader, dataset
 
-if __name__ == "__main__":
-    data_path = "数据集/数据集/源域数据集"
-    
+if __name__ == '__main__':
     # 测试不同的2D转换方法
+    data_path = r"数据集\数据集\源域数据集"
     methods = ['stft', 'cwt', 'spectrogram', 'reshape']
     
-    # 设置matplotlib为非交互模式
+    # 关闭交互模式，避免图像显示阻塞
     plt.ioff()
     
     for method in methods:
@@ -794,9 +932,10 @@ if __name__ == "__main__":
         
         train_loader, test_loader, dataset = create_bearing_dataloaders(
             data_path, 
-            batch_size=32, 
-            window_size=8192,
-            step_size=2048,
+            batch_size=Config.BATCH_SIZE, 
+            train_ratio=Config.TRAIN_RATIO,
+            window_size=Config.WINDOW_SIZE,
+            step_size=None,  # 让函数自动根据Config.OVERLAP_RATIO计算
             transform_to_2d=True,
             transform_method=method
         )
@@ -813,7 +952,7 @@ if __name__ == "__main__":
     print("所有转换方法测试完成！")
     print("生成的图像文件:")
     for method in methods:
-        print(f"  - imgs/class_signals_and_2d_windows_{method}.png")
+        print(f"  - imgs_pre/class_signals_and_2d_windows_{method}.png")
     print(f"{'='*60}")
     
     # 测试数据加载（使用最后一个数据集）
