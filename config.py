@@ -7,18 +7,19 @@ class Config:
     
     # 数据相关参数
     DATA_PATH = r"数据集\数据集\源域数据集"
-    WINDOW_SIZE = 8192  # 64*64 = 4096，匹配CNN输入
-    OVERLAP_RATIO = 0.3  # 重叠
+    WINDOW_SIZE = 4096  # 64*64 = 4096，匹配CNN输入
+    OVERLAP_RATIO = 0.5  # 重叠
     TRAIN_RATIO = 0.8  # 训练集比例
     
     # 2D转换方法配置
-    TRANSFORM_METHOD = 'cwt'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
+    TRANSFORM_METHOD = 'stft'  # 可选: 'stft', 'cwt', 'spectrogram', 'reshape'
     
     # 模型相关参数
     NUM_CLASSES = 4
     INPUT_SIZE = (1, 64, 64)  # 输入图像尺寸
     GROWTH_RATE = 6  # DenseBlock增长率
-    
+
+
     # 训练相关参数
     BATCH_SIZE = 32
     EPOCHS = 50
@@ -60,7 +61,11 @@ class Config:
     @classmethod
     def get_model_state_path(cls):
         """根据TRANSFORM_METHOD生成模型状态文件路径"""
-        return f'model/bearing_fault_cnn_4class_{cls.TRANSFORM_METHOD}.pth'
+        # 使用现有的4类spectrogram模型
+        if cls.TRANSFORM_METHOD == 'spectrogram':
+            return f'model/bearing_fault_cnn_4class_{cls.TRANSFORM_METHOD}_full.pth'
+        else:
+            return f'model/bearing_fault_cnn_4class_{cls.TRANSFORM_METHOD}.pth'
     
     @classmethod
     def get_confusion_matrix_path(cls):
