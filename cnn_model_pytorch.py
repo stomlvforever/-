@@ -187,6 +187,171 @@ class DenseNetCNN(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
 
+class StandardCNN(nn.Module):
+    """
+    标准CNN架构 - 使用普通卷积
+    适用于轴承故障诊断的基础卷积神经网络
+    """
+    
+    def __init__(self, num_classes=None, input_size=64):
+        super(StandardCNN, self).__init__()
+        if num_classes is None:
+            num_classes = Config.NUM_CLASSES
+        
+        # Conv1: 5×5×16, 普通卷积
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=5, padding=2, bias=False)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        # Conv2: 3×3×32, 普通卷积
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(32)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        # Conv3: 3×3×64, 普通卷积
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        # Conv4: 3×3×128, 普通卷积
+        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False)
+        self.bn4 = nn.BatchNorm2d(128)
+        
+        # Global Average Pooling
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # 全连接层
+        self.fc1 = nn.Linear(128, 64)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+        # 初始化权重
+        self._initialize_weights()
+    
+    def forward(self, x):
+        # Conv1 + BN + ReLU + Pool
+        x = self.pool1(F.relu(self.bn1(self.conv1(x))))
+        
+        # Conv2 + BN + ReLU + Pool
+        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
+        
+        # Conv3 + BN + ReLU + Pool
+        x = self.pool3(F.relu(self.bn3(self.conv3(x))))
+        
+        # Conv4 + BN + ReLU
+        x = F.relu(self.bn4(self.conv4(x)))
+        
+        # Global Average Pooling
+        x = self.global_avg_pool(x)
+        x = x.view(x.size(0), -1)
+        
+        # 全连接层
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        
+        return x
+    
+    def _initialize_weights(self):
+        """初始化模型权重"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+class DilatedCNN(nn.Module):
+    """
+    空洞卷积CNN架构 - 使用膨胀卷积扩大感受野
+    通过空洞卷积在不增加参数的情况下捕获更大范围的特征
+    """
+    
+    def __init__(self, num_classes=None, input_size=64):
+        super(DilatedCNN, self).__init__()
+        if num_classes is None:
+            num_classes = Config.NUM_CLASSES
+        
+        # Conv1: 5×5×16, dilation_rate=1 (普通卷积作为基础)
+        # 感受野: 5×5
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=5, padding=2, dilation=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # 64×64 -> 32×32
+        
+        # Conv2: 3×3×32, dilation_rate=2 (轻度膨胀)
+        # 感受野: 5×5 (等效于普通5×5卷积，但参数更少)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=2, dilation=2, bias=False)
+        self.bn2 = nn.BatchNorm2d(32)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # 32×32 -> 16×16
+        
+        # Conv3: 3×3×64, dilation_rate=4 (中度膨胀)
+        # 感受野: 9×9 (捕获中等范围特征)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=4, dilation=4, bias=False)
+        self.bn3 = nn.BatchNorm2d(64)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)  # 16×16 -> 8×8
+        
+        # Conv4: 3×3×128, dilation_rate=8 (高度膨胀)
+        # 感受野: 17×17 (捕获大范围特征，适合频谱分析)
+        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=8, dilation=8, bias=False)
+        self.bn4 = nn.BatchNorm2d(128)
+        
+        # 可选：添加一个1×1卷积进行特征融合
+        self.conv1x1 = nn.Conv2d(128, 128, kernel_size=1, bias=False)
+        self.bn1x1 = nn.BatchNorm2d(128)
+        
+        # Global Average Pooling
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # 全连接层
+        self.fc1 = nn.Linear(128, 64)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+        # 初始化权重
+        self._initialize_weights()
+    
+    def forward(self, x):
+        # Conv1 + BN + ReLU + Pool (普通卷积)
+        x = self.pool1(F.relu(self.bn1(self.conv1(x))))
+        
+        # Conv2 + BN + ReLU + Pool (轻度膨胀)
+        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
+        
+        # Conv3 + BN + ReLU + Pool (中度膨胀)
+        x = self.pool3(F.relu(self.bn3(self.conv3(x))))
+        
+        # Conv4 + BN + ReLU (高度膨胀)
+        x = F.relu(self.bn4(self.conv4(x)))
+        
+        # 1×1卷积特征融合
+        x = F.relu(self.bn1x1(self.conv1x1(x)))
+        
+        # Global Average Pooling
+        x = self.global_avg_pool(x)
+        x = x.view(x.size(0), -1)
+        
+        # 全连接层
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        
+        return x
+    
+    def _initialize_weights(self):
+        """初始化模型权重"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
 def train_model(model, train_loader, val_loader=None, epochs=10, learning_rate=0.001, device='cpu'):
     """训练模型并记录日志，使用tqdm显示进度"""
     model.to(device)
@@ -582,8 +747,39 @@ if __name__ == "__main__":
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         log_and_print(f"使用设备: {device}")
 
-        log_and_print("创建轴承故障诊断CNN模型...")
-        model = DenseNetCNN(num_classes=Config.NUM_CLASSES)
+        # 模型选择
+        print("\n请选择CNN模型架构:")
+        print("1. DenseNetCNN (密集连接)")
+        print("2. StandardCNN (普通卷积)")
+        print("3. DilatedCNN (空洞卷积)")
+        
+        while True:
+            try:
+                choice = input("请输入选择 (1-3): ").strip()
+                if choice == '1':
+                    model = DenseNetCNN(num_classes=Config.NUM_CLASSES)
+                    model_name = "DenseNetCNN"
+                    log_and_print("选择模型: DenseNetCNN (密集连接)")
+                    break
+                elif choice == '2':
+                    model = StandardCNN(num_classes=Config.NUM_CLASSES)
+                    model_name = "StandardCNN"
+                    log_and_print("选择模型: StandardCNN (普通卷积)")
+                    break
+                elif choice == '3':
+                    model = DilatedCNN(num_classes=Config.NUM_CLASSES)
+                    model_name = "DilatedCNN"
+                    log_and_print("选择模型: DilatedCNN (空洞卷积)")
+                    break
+                else:
+                    print("无效选择，请输入 1、2 或 3")
+            except KeyboardInterrupt:
+                print("\n程序被用户中断")
+                exit(0)
+            except Exception as e:
+                print(f"输入错误: {e}")
+        
+        log_and_print(f"创建轴承故障诊断CNN模型: {model_name}")
         
         # 显示模型结构
         model_summary(model, Config.INPUT_SIZE)
@@ -604,7 +800,7 @@ if __name__ == "__main__":
         class_names = dataset.get_class_names()
         log_and_print(f"类别名称: {class_names}")
 
-        log_and_print("开始训练轴承故障诊断模型...")
+        log_and_print(f"开始训练轴承故障诊断模型: {model_name}...")
         history = train_model(
             model, train_loader, val_loader, 
             epochs=Config.EPOCHS, 
@@ -628,7 +824,7 @@ if __name__ == "__main__":
                 os.makedirs(Config.IMG_DIR, exist_ok=True)
                 confusion_matrix_path = Config.get_confusion_matrix_path()  # 修改这里
                 plot_confusion_matrix(val_results['confusion_matrix'], class_names, 
-                                    title="验证集混淆矩阵", save_path=confusion_matrix_path)
+                                    title=f"{model_name} 验证集混淆矩阵", save_path=confusion_matrix_path)
             
             # 保存模型
             os.makedirs(Config.MODEL_DIR, exist_ok=True)
@@ -651,7 +847,7 @@ if __name__ == "__main__":
                 log_and_print(f"保存完整模型失败: {e}")
                 log_and_print("仅保存了模型参数，可以通过加载参数到新模型实例来使用")
         
-        log_and_print("轴承故障诊断CNN模型训练完成！")
+        log_and_print(f"轴承故障诊断CNN模型训练完成！模型: {model_name}")
         log_and_print(f"完整日志已保存到: {log_file}")
         
     except Exception as e:
