@@ -24,31 +24,24 @@ except ImportError:
     STEP_SIZE = 2048
 
 class BearingDataset(Dataset):
-    def __init__(self, data_path, window_size=Config.WINDOW_SIZE, step_size=STEP_SIZE, transform_to_2d=False, transform_method='stft'):
-        """
-        轴承故障数据集
-        
-        Args:
-            data_path: 数据路径
-            window_size: 滑动窗口大小，如果为None则使用配置文件中的值
-            step_size: 滑动步长，如果为None则使用配置文件中的值
-            transform_to_2d: 是否转换为2D
-            transform_method: 2D转换方法
-        """
+    def __init__(self, data_path, window_size=8192, step_size=STEP_SIZE, 
+                 transform_to_2d=True, transform_method='stft'):
         self.data_path = data_path
-        # 使用配置文件中的参数，如果没有传入的话
         self.window_size = window_size
         self.step_size = step_size 
         self.transform_to_2d = transform_to_2d
         self.transform_method = transform_method
         
-        # 修正后的10种分类故障映射（根据实际数据集）
+        # 简化为4类分类故障映射
         self.fault_mapping = {
-            'Normal': 0,
-            'IR_0007': 1, 'IR_0014': 2, 'IR_0021': 3, 'IR_0028': 4,
-            'B_0007': 5, 'B_0014': 6, 'B_0021': 7, 'B_0028': 8,
-            'OR_0007': 9, 'OR_0021': 10  # 只有这两种外圈故障尺寸
+            'Normal': 0,    # N - 正常
+            'IR': 1,        # IR - 内圈故障（所有尺寸合并）
+            'B': 2,         # B - 滚动体故障（所有尺寸合并）
+            'OR': 3         # OR - 外圈故障（所有尺寸合并）
         }
+        
+        # 定义要处理的故障类型（只处理B、IR、OR）
+        self.target_fault_types = ['B', 'IR', 'OR']
         
         self.samples = []
         self.labels = []
@@ -65,15 +58,15 @@ class BearingDataset(Dataset):
         self._print_class_distribution()
     
     def _load_data(self):
-        """加载数据 - 遍历所有数据源并根据文件夹名称确定采样频率"""
+        """加载数据 - 只加载指定的三个文件夹和特定故障类型"""
         print("开始加载轴承数据...")
         
-        # 定义所有数据源及其采样频率
+        # 定义要使用的数据源及其采样频率
         data_sources = [
             ('48kHz_Normal_data', 48000, 'normal'),
             ('48kHz_DE_data', 48000, 'fault'),
-            ('12kHz_DE_data', 12000, 'fault'), 
-            ('12kHz_FE_data', 12000, 'fault')
+            ('12kHz_DE_data', 12000, 'fault')
+            # 移除 12kHz_FE_data
         ]
         
         for folder_name, fs, data_type in data_sources:
@@ -88,6 +81,7 @@ class BearingDataset(Dataset):
                 print(f"警告: 未找到 {folder_name} 文件夹")
         
         print(f"数据加载完成: 总共 {len(self.samples)} 个样本")
+        print("目标分类: B(滚动体故障), IR(内圈故障), OR(外圈故障), N(正常)")
     
     def _process_normal_data_with_fs(self, normal_folder, fs):
         """处理正常数据 - 使用指定采样频率"""
@@ -119,19 +113,28 @@ class BearingDataset(Dataset):
                                 'file': file_name,
                                 'fault_type': 'Normal',
                                 'fault_size': 'N/A',
+                                'detailed_label': 'Normal',
                                 'fs': fs
                             })
                         
-                        print(f"  {file_name}: 采样频率 {fs}Hz, 生成 {len(windows)} 个正常样本")
+                        # 存储原始信号用于可视化
+                        signal_key = f"Normal_{file_name}_{fs}Hz"
+                        self.raw_signals[signal_key] = {
+                            'signal': vibration_data,
+                            'fs': fs,
+                            'fault_type': 'Normal',
+                            'fault_size': 'N/A',
+                            'file_name': file_name
+                        }
+                        
+                        print(f"  正常数据 {file_name}: {len(windows)} 个样本")
                         
                 except Exception as e:
-                    print(f"  错误: {file_name} - {e}")
-    
+                    print(f"处理正常数据文件 {file_name} 时出错: {e}")
+
     def _process_fault_data_with_fs(self, fault_folder_path, fs):
-        """处理故障数据 - 使用指定采样频率"""
-        fault_types = ['B', 'IR', 'OR']
-        
-        for fault_type in fault_types:
+        """处理故障数据 - 使用指定采样频率，只处理指定的故障类型"""
+        for fault_type in self.target_fault_types:  # 只处理B、IR、OR
             fault_path = os.path.join(fault_folder_path, fault_type)
             if not os.path.exists(fault_path):
                 continue
@@ -148,7 +151,7 @@ class BearingDataset(Dataset):
                 self._process_fault_sizes_with_fs(fault_path, fault_type, fs)
     
     def _process_fault_sizes_with_fs(self, fault_path, fault_type, fs):
-        """处理特定故障类型的不同尺寸 - 使用指定采样频率"""
+        """处理特定故障类型的不同尺寸 - 使用指定采样频率，所有尺寸合并为同一类"""
         # 定义尺寸映射
         if fault_type == 'OR':
             size_folders = ['0007', '0021']  # 外圈故障只有这两种尺寸
@@ -158,11 +161,10 @@ class BearingDataset(Dataset):
         for size_folder in size_folders:
             size_path = os.path.join(fault_path, size_folder)
             if os.path.exists(size_path):
-                # 构建详细故障标签
-                detailed_fault_label = f"{fault_type}_{size_folder}"
-                self._process_size_folder_with_fs(size_path, detailed_fault_label, fs)
+                # 使用故障类型作为标签（不区分尺寸）
+                self._process_size_folder_with_fs(size_path, fault_type, fs, size_folder)
     
-    def _process_size_folder_with_fs(self, size_path, detailed_fault_label, fs):
+    def _process_size_folder_with_fs(self, size_path, fault_type, fs, size_folder):
         """处理特定尺寸文件夹中的所有.mat文件 - 使用指定采样频率"""
         sample_count = 0
         
@@ -189,22 +191,31 @@ class BearingDataset(Dataset):
                         # 添加到数据集
                         for window in windows:
                             self.samples.append(window)
-                            self.labels.append(self.fault_mapping[detailed_fault_label])
+                            self.labels.append(self.fault_mapping[fault_type])  # 使用故障类型标签
                             self.file_info.append({
                                 'file': file_name,
-                                'fault_type': detailed_fault_label.split('_')[0],
-                                'fault_size': detailed_fault_label.split('_')[1],
-                                'detailed_label': detailed_fault_label,
+                                'fault_type': fault_type,
+                                'fault_size': size_folder,
+                                'detailed_label': f"{fault_type}_{size_folder}",
                                 'fs': fs
                             })
                         
                         sample_count += len(windows)
                         
+                        # 存储原始信号用于可视化
+                        signal_key = f"{fault_type}_{size_folder}_{file_name}_{fs}Hz"
+                        self.raw_signals[signal_key] = {
+                            'signal': vibration_data,
+                            'fs': fs,
+                            'fault_type': fault_type,
+                            'fault_size': size_folder,
+                            'file_name': file_name
+                        }
+                        
                 except Exception as e:
-                    print(f"  错误: {file_name} - {e}")
-            
-            if sample_count > 0:
-                print(f"  {detailed_fault_label}: 采样频率 {fs}Hz, 总共生成 {sample_count} 个样本")
+                    print(f"处理文件 {file_name} 时出错: {e}")
+        
+        print(f"  {fault_type}_{size_folder}: {sample_count} 个样本")
 
     def _get_window_size_for_fs(self, fs):
         """根据采样频率计算窗口大小"""
@@ -326,8 +337,10 @@ class BearingDataset(Dataset):
             signal_length = len(signal)
             if signal_length <= 8192:
                 nperseg = 256  # 12kHz数据使用较小窗口
+                fs = 12000     # 12kHz采样频率
             else:
                 nperseg = 1024  # 48kHz数据使用较大窗口
+                fs = 48000      # 48kHz采样频率
             
             noverlap = nperseg // 2  # 50%重叠
             nfft = nperseg  # FFT点数
@@ -338,7 +351,7 @@ class BearingDataset(Dataset):
             # 计算STFT
             f, t, Zxx = scipy_signal.stft(
                 signal, 
-                fs=12000,  # 采样频率
+                fs=fs,  # 使用正确的采样频率
                 window=window,
                 nperseg=nperseg,
                 noverlap=noverlap,
@@ -404,16 +417,24 @@ class BearingDataset(Dataset):
             # 功率谱密度
             from scipy import signal as scipy_signal
             
-            # 根据信号长度调整参数
+            # 根据信号长度自适应调整参数
             signal_length = len(signal)
             if signal_length <= 8192:
+                # 12kHz数据
+                fs = 12000
                 nperseg = 256
             else:
+                # 48kHz数据  
+                fs = 48000
                 nperseg = 1024
+            
+            # 验证时间分辨率一致性（可选的调试信息）
+            time_resolution = nperseg / fs
+            # print(f"信号长度: {signal_length}, 采样频率: {fs}Hz, 窗口大小: {nperseg}, 时间分辨率: {time_resolution:.4f}s")
                 
             f, t, Sxx = scipy_signal.spectrogram(
                 signal, 
-                fs=12000,
+                fs=fs,  # 使用正确的采样频率
                 nperseg=nperseg,
                 noverlap=nperseg//2
             )
@@ -677,8 +698,8 @@ class BearingDataset(Dataset):
                                     continue
             else:
                 # 故障数据搜索优先级：48kHz_DE > 12kHz_DE > 12kHz_FE
-                fault_type = fault_name.split('_')[0]
-                fault_size = fault_name.split('_')[1]
+                # 在4分类模式下，fault_name就是故障类型（IR、B、OR）
+                fault_type = fault_name
                 
                 # 搜索路径列表（按优先级排序）
                 search_paths = [
@@ -692,23 +713,27 @@ class BearingDataset(Dataset):
                     if not os.path.exists(base_folder):
                         continue
                         
-                    # 构建具体路径
+                    # 构建具体路径 - 遍历所有可能的故障尺寸
                     if fault_type == 'OR':
                         # OR故障有多个子文件夹
                         or_subfolders = ['Centered', 'Opposite', 'Orthogonal']
+                        fault_sizes = ['0007', '0021']  # OR故障的可用尺寸
                         for subfolder in or_subfolders:
-                            fault_path = os.path.join(base_folder, fault_type, subfolder, fault_size)
+                            for fault_size in fault_sizes:
+                                fault_path = os.path.join(base_folder, fault_type, subfolder, fault_size)
+                                if os.path.exists(fault_path):
+                                    result = self._try_load_from_path(fault_path, fault_name, fs, folder_name)
+                                    if result is not None:
+                                        return result
+                    else:
+                        # IR和B故障直接路径 - 遍历所有可能的故障尺寸
+                        fault_sizes = ['0007', '0014', '0021', '0028']  # 所有可能的故障尺寸
+                        for fault_size in fault_sizes:
+                            fault_path = os.path.join(base_folder, fault_type, fault_size)
                             if os.path.exists(fault_path):
                                 result = self._try_load_from_path(fault_path, fault_name, fs, folder_name)
                                 if result is not None:
                                     return result
-                    else:
-                        # IR和B故障直接路径
-                        fault_path = os.path.join(base_folder, fault_type, fault_size)
-                        if os.path.exists(fault_path):
-                            result = self._try_load_from_path(fault_path, fault_name, fs, folder_name)
-                            if result is not None:
-                                return result
                                         
         except Exception as e:
             print(f"加载 {fault_name} 数据时出错: {e}")
@@ -870,6 +895,13 @@ class BearingDataset(Dataset):
         for fault_name, label in self.fault_mapping.items():
             if fault_name == 'Normal':
                 class_names[label] = '正常'
+            elif fault_name == 'IR':
+                class_names[label] = '内圈故障'
+            elif fault_name == 'B':
+                class_names[label] = '滚动体故障'
+            elif fault_name == 'OR':
+                class_names[label] = '外圈故障'
+            # 兼容旧的命名方式（带尺寸的）
             elif fault_name.startswith('IR_'):
                 size = fault_name.split('_')[1]
                 class_names[label] = f'内圈故障_{size}'
