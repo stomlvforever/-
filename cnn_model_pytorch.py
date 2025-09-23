@@ -566,7 +566,7 @@ def plot_confusion_matrix(cm, class_names, title="混淆矩阵", save_path=None)
 if __name__ == "__main__":
     # 设置日志记录
     log_file = setup_logging()
-    log_and_print("开始轴承故障诊断CNN模型训练 - 12分类")
+    log_and_print("开始轴承故障诊断CNN模型训练 - 4分类")
     log_and_print(f"配置参数:")
     log_and_print(f"  数据路径: {Config.DATA_PATH}")
     log_and_print(f"  窗口大小: {Config.WINDOW_SIZE}")
