@@ -7,8 +7,8 @@ class Config:
     
     # 数据相关参数
     DATA_PATH = r"数据集\数据集\源域数据集"
-    WINDOW_SIZE = 256  # 64*64 = 4096，匹配CNN输入
-    OVERLAP_RATIO = 0.3  # 重叠
+    WINDOW_SIZE = 128  # 64*64 = 4096，匹配CNN输入
+    OVERLAP_RATIO = 0.5  # 重叠
     TRAIN_RATIO = 0.8  # 训练集比例
     
     # 2D转换方法配置
@@ -18,12 +18,12 @@ class Config:
     NUM_CLASSES = 4
     INPUT_SIZE = (1, 64, 64)  # 输入图像尺寸
     GROWTH_RATE = 6  # DenseBlock增长率
-
+    DROPOUT_RATE = 0.3  # Dropout比例
 
     # 训练相关参数
     BATCH_SIZE = 32
-    EPOCHS = 20
-    LEARNING_RATE = 0.0003
+    EPOCHS = 50
+    LEARNING_RATE = 0.00002
     
     # 基础目录参数
     MODEL_DIR = 'model'
