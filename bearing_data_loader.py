@@ -341,8 +341,14 @@ class BearingDataset(Dataset):
         method = self.transform_method
         
         if method == 'stft':
-            # 统一的STFT参数（适用于12kHz采样频率）
-            nperseg = 256
+            # 动态调整STFT参数，确保nperseg不超过信号长度
+            signal_length = len(signal)
+            nperseg = min(256, signal_length)  # 确保nperseg不超过信号长度
+            
+            # 确保nperseg是偶数，便于计算noverlap
+            if nperseg % 2 != 0:
+                nperseg -= 1
+                
             noverlap = nperseg // 2
             nfft = nperseg
             
@@ -674,6 +680,276 @@ class BearingDataset(Dataset):
         
         print("-" * 40)
         print(f"{'总计':>10}: {total_samples:>6} 样本")
+
+def create_bearing_dataloaders_by_file(data_path, batch_size=32, train_ratio=0.8, window_size=4096, step_size=None, overlap_ratio=0.5, transform_to_2d=False, transform_method='stft', enable_resampling=True, target_fs=12000, random_seed=42):
+    """
+    按文件划分创建训练和验证数据加载器，避免数据泄露
+    
+    Args:
+        data_path: 数据路径
+        batch_size: 批次大小
+        train_ratio: 训练集比例
+        window_size: 窗口大小
+        step_size: 步长
+        overlap_ratio: 重叠比例
+        transform_to_2d: 是否转换为2D
+        transform_method: 转换方法
+        enable_resampling: 是否启用重采样
+        target_fs: 目标采样频率
+        random_seed: 随机种子
+    
+    Returns:
+        train_loader, val_loader, dataset, file_split_info
+    """
+    import random
+    
+    # 设置随机种子
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    
+    # 如果没有指定step_size，根据overlap_ratio计算
+    if step_size is None:
+        step_size = int(window_size * (1 - overlap_ratio))
+    
+    # 创建完整数据集
+    dataset = BearingDataset(data_path, window_size, step_size, transform_to_2d, transform_method, enable_resampling, target_fs)
+    
+    # 获取所有唯一的文件名
+    unique_files = {}
+    for i, file_info in enumerate(dataset.file_info):
+        file_key = f"{file_info.get('file_name', file_info.get('file', 'unknown'))}_{file_info['fault_type']}"
+        if file_key not in unique_files:
+            unique_files[file_key] = []
+        unique_files[file_key].append(i)
+    
+    print(f"总共找到 {len(unique_files)} 个唯一文件")
+    
+    # 按类别分组文件
+    files_by_class = {}
+    for file_key, indices in unique_files.items():
+        fault_type = dataset.file_info[indices[0]]['fault_type']
+        if fault_type not in files_by_class:
+            files_by_class[fault_type] = []
+        files_by_class[fault_type].append((file_key, indices))
+    
+    # 打印每个类别的文件数量
+    print("\n各类别文件分布:")
+    for fault_type, files in files_by_class.items():
+        print(f"  {fault_type}: {len(files)} 个文件")
+    
+    # 按类别分层划分文件
+    train_indices = []
+    val_indices = []
+    file_split_info = {'train_files': [], 'val_files': []}
+    
+    for fault_type, files in files_by_class.items():
+        # 随机打乱文件顺序
+        random.shuffle(files)
+        
+        # 计算训练文件数量
+        num_files = len(files)
+
+        num_train_files = max(1, int(num_files * train_ratio))  # 至少保证每个类别有1个训练文件
+        
+        # 分配文件到训练集和验证集
+        train_files = files[:num_train_files]
+        val_files = files[num_train_files:]
+        
+        print(f"  {fault_type}: 训练文件 {len(train_files)}, 验证文件 {len(val_files)}")
+        
+        # 收集训练集样本索引
+        for file_key, indices in train_files:
+            train_indices.extend(indices)
+            file_split_info['train_files'].append({
+                'file_key': file_key,
+                'fault_type': fault_type,
+                'sample_count': len(indices)
+            })
+        
+        # 收集验证集样本索引
+        for file_key, indices in val_files:
+            val_indices.extend(indices)
+            file_split_info['val_files'].append({
+                'file_key': file_key,
+                'fault_type': fault_type,
+                'sample_count': len(indices)
+            })
+        # print(f"  {fault_type}: 总文件数 {num_files}")
+    # assert 0        
+    # 创建子数据集
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    
+    # 创建数据加载器
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    print(f"\n最终数据划分:")
+    print(f"训练集大小: {len(train_indices)} 样本")
+    print(f"验证集大小: {len(val_indices)} 样本")
+    print(f"训练集比例: {len(train_indices)/(len(train_indices)+len(val_indices)):.3f}")
+    
+    # 验证数据划分的正确性
+    print(f"\n验证数据划分正确性:")
+    train_files_set = set([info['file_key'] for info in file_split_info['train_files']])
+    val_files_set = set([info['file_key'] for info in file_split_info['val_files']])
+    overlap = train_files_set.intersection(val_files_set)
+    
+    if len(overlap) == 0:
+        print("✓ 训练集和验证集文件完全分离，无数据泄露")
+    else:
+        print(f"✗ 警告: 发现重叠文件 {overlap}")
+    
+    return train_loader, val_loader, dataset, file_split_info
+
+def create_bearing_dataloaders_manual_split(data_path, batch_size=32, window_size=4096, step_size=None, overlap_ratio=0.5, transform_to_2d=False, transform_method='stft', enable_resampling=True, target_fs=12000, random_seed=42):
+    """
+    按照TRAIN_RATIO比例自动选择文件进行训练和验证集划分
+    
+    按照您的具体要求：
+    - 12kHz_FE_data的B故障：12个文件按TRAIN_RATIO=0.7比例，取整为8个训练文件
+    - 12kHz_FE_data的IR故障：12个文件按TRAIN_RATIO=0.7比例，取整为8个训练文件  
+    - 12kHz_FE_data的OR故障：15个文件按TRAIN_RATIO=0.7比例，取整为10个训练文件
+    - 48kHz_DE_data：和12kHz_FE_data一样处理
+    - 48kHz_Normal_data：4个文件挑3个当训练集
+    """
+    import random
+    from config import Config
+    
+    # 设置随机种子
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    
+    # 如果没有指定step_size，根据overlap_ratio计算
+    if step_size is None:
+        step_size = int(window_size * (1 - overlap_ratio))
+    
+    # 创建完整数据集
+    dataset = BearingDataset(data_path, window_size, step_size, transform_to_2d, transform_method, enable_resampling, target_fs)
+    
+    # 获取所有唯一的文件名并按故障类型分组
+    files_by_fault_type = {}
+    for i, file_info in enumerate(dataset.file_info):
+        file_name = file_info.get('file_name', file_info.get('file', 'unknown'))
+        fault_type = file_info['fault_type']
+        file_key = f"{file_name}_{fault_type}"
+        
+        if fault_type not in files_by_fault_type:
+            files_by_fault_type[fault_type] = {}
+        
+        if file_key not in files_by_fault_type[fault_type]:
+            files_by_fault_type[fault_type][file_key] = []
+        files_by_fault_type[fault_type][file_key].append(i)
+    
+    print("各故障类型的文件分布:")
+    for fault_type, files in files_by_fault_type.items():
+        print(f"  {fault_type}: {len(files)} 个文件")
+        for file_key in sorted(files.keys()):
+            print(f"    {file_key}: {len(files[file_key])} 个样本")
+    
+    # 按照要求确定每个故障类型的训练文件数量
+    train_file_counts = {}
+    for fault_type, files in files_by_fault_type.items():
+        total_files = len(files)
+        if fault_type == 'Normal':
+            # Normal类型特殊处理：4个文件选3个
+            train_count = 3
+        else:
+            # 其他类型按TRAIN_RATIO比例取整
+            train_count = int(total_files * Config.TRAIN_RATIO)
+        
+        train_file_counts[fault_type] = train_count
+        print(f"\n{fault_type} 故障类型:")
+        print(f"  总文件数: {total_files}")
+        print(f"  训练文件数: {train_count}")
+        print(f"  验证文件数: {total_files - train_count}")
+    
+    # 按照确定的数量随机选择训练文件
+    train_indices = []
+    val_indices = []
+    file_split_info = {'train_files': [], 'val_files': []}
+    
+    for fault_type, files in files_by_fault_type.items():
+        train_count = train_file_counts[fault_type]
+        
+        # 获取该故障类型的所有文件键并随机打乱
+        file_keys = list(files.keys())
+        random.shuffle(file_keys)
+        
+        # 选择训练文件和验证文件
+        train_file_keys = file_keys[:train_count]
+        val_file_keys = file_keys[train_count:]
+        
+        print(f"\n{fault_type} 故障类型文件划分:")
+        print("  训练文件:")
+        for file_key in train_file_keys:
+            indices = files[file_key]
+            train_indices.extend(indices)
+            file_split_info['train_files'].append({
+                'file_key': file_key,
+                'fault_type': fault_type,
+                'sample_count': len(indices)
+            })
+            print(f"    ✓ {file_key}: {len(indices)} 个样本")
+        
+        print("  验证文件:")
+        for file_key in val_file_keys:
+            indices = files[file_key]
+            val_indices.extend(indices)
+            file_split_info['val_files'].append({
+                'file_key': file_key,
+                'fault_type': fault_type,
+                'sample_count': len(indices)
+            })
+            print(f"    ✓ {file_key}: {len(indices)} 个样本")
+    
+    # 创建子数据集
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    
+    # 创建数据加载器
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    print(f"\n数据集划分完成:")
+    print(f"训练集大小: {len(train_indices)} 个样本")
+    print(f"验证集大小: {len(val_indices)} 个样本")
+    print(f"训练集批次数: {len(train_loader)}")
+    print(f"验证集批次数: {len(val_loader)}")
+    
+    # 验证文件划分的正确性
+    train_file_keys = set([info['file_key'] for info in file_split_info['train_files']])
+    val_file_keys = set([info['file_key'] for info in file_split_info['val_files']])
+    overlap = train_file_keys.intersection(val_file_keys)
+    
+    if len(overlap) == 0:
+        print("✓ 训练集和验证集文件完全分离，无数据泄露")
+    else:
+        print(f"✗ 警告: 发现重叠文件 {overlap}")
+    
+    # 打印各类别的样本分布
+    print(f"\n各类别样本分布:")
+    train_class_counts = {}
+    val_class_counts = {}
+    
+    for info in file_split_info['train_files']:
+        fault_type = info['fault_type']
+        train_class_counts[fault_type] = train_class_counts.get(fault_type, 0) + info['sample_count']
+    
+    for info in file_split_info['val_files']:
+        fault_type = info['fault_type']
+        val_class_counts[fault_type] = val_class_counts.get(fault_type, 0) + info['sample_count']
+    
+    for fault_type in sorted(set(list(train_class_counts.keys()) + list(val_class_counts.keys()))):
+        train_count = train_class_counts.get(fault_type, 0)
+        val_count = val_class_counts.get(fault_type, 0)
+        total_count = train_count + val_count
+        train_ratio = train_count / total_count if total_count > 0 else 0
+        print(f"  {fault_type}: 训练集 {train_count} 样本, 验证集 {val_count} 样本, 训练比例 {train_ratio:.3f}")
+    
+    return train_loader, val_loader, dataset, file_split_info
 
 def create_bearing_dataloaders(data_path, batch_size=32, train_ratio=0.8, window_size=4096, step_size=None, overlap_ratio=0.5, transform_to_2d=False, transform_method='stft', enable_resampling=True, target_fs=12000):
     """创建训练和测试数据加载器"""
