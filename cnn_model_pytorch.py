@@ -13,7 +13,7 @@ from datetime import datetime
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 from tqdm import tqdm
-from bearing_data_loader import create_bearing_dataloaders
+from bearing_data_loader import create_bearing_dataloaders, create_bearing_dataloaders_by_file, create_bearing_dataloaders_manual_split
 from config import Config
 
 # 设置matplotlib中文字体
@@ -92,10 +92,6 @@ class DenseBlock(nn.Module):
         return out
 
 class DenseNetCNN(nn.Module):
-    """
-    根据表格架构创建CNN模型 - 适用于轴承故障诊断
-    """
-    
     def __init__(self, num_classes=None):
         super(DenseNetCNN, self).__init__()
         if num_classes is None:
@@ -108,38 +104,41 @@ class DenseNetCNN(nn.Module):
         # Pooling1: 2×2 max pool, stride=2
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Dense Block 1: growth_rate=6
+        # Dense Block 1: 动态计算输出通道数
         self.dense1 = DenseBlock(16, Config.GROWTH_RATE)
-        # 输出通道数: 16 + 6 + 6 = 28
+        # 输出通道数: 16 + growth_rate + growth_rate = 16 + 2*growth_rate
+        dense1_out_channels = 16 + 2 * Config.GROWTH_RATE
         
-        # Conv2: 3×3×32, dilation_rate=2
-        self.conv2 = nn.Conv2d(28, 32, kernel_size=3, padding=2, dilation=2, bias=False)
+        # Conv2: 3×3×32, dilation_rate=2 - 使用动态计算的输入通道数
+        self.conv2 = nn.Conv2d(dense1_out_channels, 32, kernel_size=3, padding=2, dilation=2, bias=False)
         self.bn2 = nn.BatchNorm2d(32)
         
         # Pooling2: 2×2 max pool, stride=2
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Dense Block 2: growth_rate=6
+        # Dense Block 2: 动态计算输出通道数
         self.dense2 = DenseBlock(32, Config.GROWTH_RATE)
-        # 输出通道数: 32 + 6 + 6 = 44
+        # 输出通道数: 32 + growth_rate + growth_rate = 32 + 2*growth_rate
+        dense2_out_channels = 32 + 2 * Config.GROWTH_RATE
         
-        # Conv3: 3×3×64, dilation_rate=3
-        self.conv3 = nn.Conv2d(44, 64, kernel_size=3, padding=3, dilation=3, bias=False)
+        # Conv3: 3×3×64, dilation_rate=3 - 使用动态计算的输入通道数
+        self.conv3 = nn.Conv2d(dense2_out_channels, 64, kernel_size=3, padding=3, dilation=3, bias=False)
         self.bn3 = nn.BatchNorm2d(64)
         
         # Pooling3: 2×2 max pool, stride=2
         self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Dense Block 3: growth_rate=6
+        # Dense Block 3: 动态计算输出通道数
         self.dense3 = DenseBlock(64, Config.GROWTH_RATE)
-        # 输出通道数: 64 + 6 + 6 = 76
+        # 输出通道数: 64 + growth_rate + growth_rate = 64 + 2*growth_rate
+        dense3_out_channels = 64 + 2 * Config.GROWTH_RATE
         
         # Global Average Pooling
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         
-        # 全连接层
-        self.fc1 = nn.Linear(76, 128)
-        self.dropout = nn.Dropout(0.5)
+        # 全连接层 - 使用动态计算的输入特征数
+        self.fc1 = nn.Linear(dense3_out_channels, 128)
+        self.dropout = nn.Dropout(Config.DROPOUT_RATE)  # 使用配置中的dropout率
         self.fc2 = nn.Linear(128, num_classes)
         
         # 初始化权重
@@ -266,12 +265,13 @@ class StandardCNN(nn.Module):
 
 class DilatedCNN(nn.Module):
     """
-    空洞卷积CNN架构 - 使用膨胀卷积扩大感受野
-    通过空洞卷积在不增加参数的情况下捕获更大范围的特征
+    空洞卷积CNN模型，用于轴承故障诊断
     """
     
     def __init__(self, num_classes=None, input_size=64):
         super(DilatedCNN, self).__init__()
+        
+        # 使用Config中的参数，如果没有则使用默认值
         if num_classes is None:
             num_classes = Config.NUM_CLASSES
         
@@ -307,7 +307,7 @@ class DilatedCNN(nn.Module):
         
         # 全连接层
         self.fc1 = nn.Linear(128, 64)
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(Config.DROPOUT_RATE)  # 使用统一配置
         self.fc2 = nn.Linear(64, num_classes)
         
         # 初始化权重
@@ -353,19 +353,25 @@ class DilatedCNN(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
 def train_model(model, train_loader, val_loader=None, epochs=10, learning_rate=0.001, device='cpu'):
-    """训练模型并记录日志，使用tqdm显示进度"""
+    """训练模型并记录日志，使用tqdm显示进度，添加StepLR学习率调度器"""
     model.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    
+    # 添加StepLR调度器 - 每40个epoch学习率减半
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
     
     history = {
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
-        'val_acc': []
+        'val_acc': [],
+        'learning_rates': []  # 记录学习率变化
     }
     
     log_and_print(f"开始训练，共 {epochs} 个epoch")
+    log_and_print(f"初始学习率: {learning_rate}")
+    log_and_print(f"学习率调度器: StepLR (step_size=40, gamma=0.5)")
     log_and_print(f"训练批次数: {len(train_loader)}")
     if val_loader:
         log_and_print(f"验证批次数: {len(val_loader)}")
@@ -374,6 +380,10 @@ def train_model(model, train_loader, val_loader=None, epochs=10, learning_rate=0
     epoch_pbar = tqdm(range(epochs), desc="训练进度", unit="epoch")
     
     for epoch in epoch_pbar:
+        # 记录当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        history['learning_rates'].append(current_lr)
+        
         # 训练阶段
         model.train()
         train_loss = 0.0
@@ -402,7 +412,8 @@ def train_model(model, train_loader, val_loader=None, epochs=10, learning_rate=0
             current_acc = 100. * train_correct / train_total
             train_pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
-                'Acc': f'{current_acc:.2f}%'
+                'Acc': f'{current_acc:.2f}%',
+                'LR': f'{current_lr:.2e}'  # 显示当前学习率
             })
         
         # 计算训练指标
@@ -450,12 +461,31 @@ def train_model(model, train_loader, val_loader=None, epochs=10, learning_rate=0
             
             val_info = f", 验证损失: {avg_val_loss:.4f}, 验证准确率: {val_accuracy:.2f}%"
         
-        # 更新epoch进度条显示
-        epoch_info = f"训练损失: {avg_train_loss:.4f}, 训练准确率: {train_accuracy:.2f}%{val_info}"
-        epoch_pbar.set_postfix_str(epoch_info)
+        # 更新学习率调度器
+        old_lr = current_lr
+        scheduler.step()
+        new_lr = optimizer.param_groups[0]['lr']
         
-        # 记录到日志
-        log_and_print(f'Epoch {epoch+1}/{epochs} - {epoch_info}')
+        # 如果学习率发生变化，记录日志
+        if new_lr != old_lr:
+            log_and_print(f"学习率更新: {old_lr:.2e} -> {new_lr:.2e}")
+        
+        # 记录日志
+        log_message = f"Epoch {epoch+1}/{epochs} - 训练损失: {avg_train_loss:.4f}, 训练准确率: {train_accuracy:.2f}%{val_info}, 学习率: {current_lr:.2e}"
+        log_and_print(log_message)
+        
+        # 更新epoch进度条显示
+        if val_loader:
+            epoch_pbar.set_postfix({
+                'Train Loss': f'{avg_train_loss:.4f}',
+                'Val Loss': f'{avg_val_loss:.4f}',
+                'LR': f'{current_lr:.2e}'
+            })
+        else:
+            epoch_pbar.set_postfix({
+                'Train Loss': f'{avg_train_loss:.4f}',
+                'LR': f'{current_lr:.2e}'
+            })
     
     epoch_pbar.close()
     log_and_print("训练完成！")
@@ -663,8 +693,8 @@ def plot_training_history(history):
     
     # 学习率曲线（如果有的话）
     plt.subplot(1, 3, 3)
-    if 'learning_rate' in history and history['learning_rate']:
-        plt.plot(epochs, history['learning_rate'], 'g-', label='学习率', linewidth=2)
+    if 'learning_rates' in history and history['learning_rates']:
+        plt.plot(epochs, history['learning_rates'], 'g-', label='学习率', linewidth=2)
         plt.title('学习率曲线', fontsize=14, fontweight='bold')
         plt.xlabel('轮次')
         plt.ylabel('学习率')
@@ -785,15 +815,20 @@ if __name__ == "__main__":
         model_summary(model, Config.INPUT_SIZE)
 
         log_and_print("加载轴承振动信号数据...")
-        train_loader, val_loader, dataset = create_bearing_dataloaders(
+        train_loader, val_loader, dataset, file_split_info = create_bearing_dataloaders_manual_split(
             data_path=Config.DATA_PATH,
             window_size=Config.WINDOW_SIZE,
             overlap_ratio=Config.OVERLAP_RATIO,
             batch_size=Config.BATCH_SIZE,
-            train_ratio=Config.TRAIN_RATIO,
             transform_to_2d=True,
-            transform_method=Config.TRANSFORM_METHOD  # 新增这一行
+            transform_method=Config.TRANSFORM_METHOD,
+            random_seed=42  # 设置随机种子确保可重复性
         )
+        
+        # 打印文件划分信息
+        log_and_print(f"按文件划分数据集:")
+        log_and_print(f"训练文件数: {len(file_split_info['train_files'])}")
+        log_and_print(f"验证文件数: {len(file_split_info['val_files'])}")
         
         log_and_print(f"训练批次数: {len(train_loader)}")
         log_and_print(f"验证批次数: {len(val_loader)}")
